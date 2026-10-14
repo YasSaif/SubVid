@@ -1,24 +1,21 @@
 import os
 import subprocess
+import asyncio
 import yt_dlp
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from deep_translator import GoogleTranslator
 
-# قراءة التوكن بأمان من إعدادات السيرفر
+# قراءة التوكن والبيانات بأمان
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
-# رابط استضافتك على Render
 WEBHOOK_URL = os.environ.get("WEBHOOKURL", "")
 
 app_flask = Flask(__name__)
 
-def fmt_time(sec: float) -> str:
-    ms = int((sec - int(sec)) * 1000)
-    m, s = divmod(int(sec), 60)
-    h, m = divmod(m, 60)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+# إعداد التطبيق والـ Handlers
+telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -81,22 +78,26 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
             if os.path.exists(f):
                 os.remove(f)
 
-# إعداد التطبيق والـ Handlers
-telegram_app = ApplicationBuilder().token(TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
 
+# تهيئة الـ Event Loop العامة لتجنب إغلاقها
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+loop.run_until_complete(telegram_app.initialize())
+
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    import asyncio
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, telegram_app.bot)
     
-    async def process():
-        await telegram_app.initialize()
-        await telegram_app.process_update(update)
+    # تشغيل الحدث باستخدام الـ Loop المفتوح والثابت
+    future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+    try:
+        future.result(timeout=30)
+    except Exception:
+        pass
         
-    asyncio.run(process())
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
@@ -104,16 +105,6 @@ def index():
     return "Bot is active and running 24/7!"
 
 if __name__ == "__main__":
-    import asyncio
-    
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-    loop.run_until_complete(telegram_app.initialize())
-    
     if WEBHOOK_URL:
         loop.run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}"))
     
