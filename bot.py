@@ -5,16 +5,13 @@ import yt_dlp
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from deep_translator import GoogleTranslator
 
-# قراءة التوكن والبيانات بأمان
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
 WEBHOOK_URL = os.environ.get("WEBHOOKURL", "")
 
 app_flask = Flask(__name__)
 
-# إعداد التطبيق والـ Handlers
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -81,7 +78,6 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
 
-# تهيئة الـ Event Loop العامة لتجنب إغلاقها
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 loop.run_until_complete(telegram_app.initialize())
@@ -90,14 +86,11 @@ loop.run_until_complete(telegram_app.initialize())
 def webhook():
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, telegram_app.bot)
-    
-    # تشغيل الحدث باستخدام الـ Loop المفتوح والثابت
     future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
     try:
         future.result(timeout=30)
     except Exception:
         pass
-        
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
@@ -106,6 +99,9 @@ def index():
 
 if __name__ == "__main__":
     if WEBHOOK_URL:
-        loop.run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}"))
-    
+        # تسجيل الويب هوك إجبارياً عند تشغيل السيرفر
+        webhook_link = f"{WEBHOOK_URL}/{TOKEN}"
+        loop.run_until_complete(telegram_app.bot.set_webhook(url=webhook_link))
+        print(f"Webhook set to: {webhook_link}")
+        
     app_flask.run(host="0.0.0.0", port=PORT)
