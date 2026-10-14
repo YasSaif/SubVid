@@ -8,7 +8,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
-WEBHOOK_URL = os.environ.get("WEBHOOKURL", "")
+# تأكد أن الرابط هنا لا ينتهي بـ /
+WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 
 app_flask = Flask(__name__)
 
@@ -99,7 +100,6 @@ def index():
 
 if __name__ == "__main__":
     if WEBHOOK_URL:
-        # تسجيل الويب هوك إجبارياً عند تشغيل السيرفر
         webhook_link = f"{WEBHOOK_URL}/{TOKEN}"
         loop.run_until_complete(telegram_app.bot.set_webhook(url=webhook_link))
         print(f"Webhook set to: {webhook_link}")
