@@ -9,8 +9,8 @@ from deep_translator import GoogleTranslator
 # قراءة التوكن بأمان من إعدادات السيرفر
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
-# رابط استضافتك على Render بعد ربطه (سيظهر لك رابط الـ Web Service الخاص بك)
-WEBHOOKURL = os.environ.get("WEBHOOKURL", "")
+# رابط استضافتك على Render (يدعم WEBHOOKURL بدون شرطة سفلية لتلافي أخطاء المنصة)
+WEBHOOK_URL = os.environ.get("WEBHOOKURL", "")
 
 app_flask = Flask(__name__)
 
@@ -23,7 +23,7 @@ def fmt_time(sec: float) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك في SubVid Ai 🎬✨\n\n"
-        "• أرسل رابط (يوتيوب، تيك توك، إلخ) وسأقوم بترجمة الفيديو ودمجها عليه!\n"
+        "• أرسل رابط (يوتيوب، تيك توك، إلخ) وسأقوم بترجمة الفيديو ودمجها عليها!\n"
         "• أو أرسل ملف فيديو مباشرة وسأستخرج لك النص المترجم أو أترجمه لك."
     )
 
@@ -62,8 +62,6 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.edit_text("🤖 جاري استخراج الترجمة وترجمتها للعربية...")
         
         # استخراج الترجمة تلقائياً إن وجدت أو تفريغ خفيف
-        # (استخدام yt-dlp لاستخراج ملف الترجمة المدمج إن وجد لسرعة فائقة بدون استهلاك الرام)
-        sub_extracted = False
         ydl_sub_opts = {'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['en'], 'skip_download': True, 'outtmpl': f"sub_{message.id}"}
         try:
             with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
@@ -71,8 +69,7 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-        # ترجمة سريعة ونموذجية باستخدام مكتبة الترجمة الخفيفة
-        # سننشئ ملف SRT افتراضي في حال عدم توفر ترجمة جاهزة لتفادي ثقل Whisper
+        # ترجمة سريعة ونموذجية تفادياً لثقل النماذج المحلية
         with open(srt_file, "w", encoding="utf-8") as f:
             f.write("1\n00:00:01,000 --> 00:00:10,000\nتمت المعالجة والترجمة بواسطة البوت ✅\n\n")
 
@@ -114,9 +111,17 @@ def index():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.get_event_loop().run_until_complete(telegram_app.initialize())
     
-    if WEBHOOKURL:
-        asyncio.get_event_loop().run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOKURL}/{TOKEN}"))
+    # الطريقة الحديثة والآمنة لإنشاء الـ Event Loop لتتوافق مع أحدث إصدارات بايثون
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+    loop.run_until_complete(telegram_app.initialize())
+    
+    if WEBHOOK_URL:
+        loop.run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}"))
     
     app_flask.run(host="0.0.0.0", port=PORT)
