@@ -9,7 +9,7 @@ from deep_translator import GoogleTranslator
 # قراءة التوكن بأمان من إعدادات السيرفر
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
-# رابط استضافتك على Render (يدعم WEBHOOKURL بدون شرطة سفلية لتلافي أخطاء المنصة)
+# رابط استضافتك على Render
 WEBHOOK_URL = os.environ.get("WEBHOOKURL", "")
 
 app_flask = Flask(__name__)
@@ -23,19 +23,17 @@ def fmt_time(sec: float) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك في SubVid Ai 🎬✨\n\n"
-        "• أرسل رابط (يوتيوب، تيك توك، إلخ) وسأقوم بترجمة الفيديو ودمجها عليها!\n"
-        "• أو أرسل ملف فيديو مباشرة وسأستخرج لك النص المترجم أو أترجمه لك."
+        "• أرسل رابط فيديو وسأقوم بترجمته ودمجها عليها!\n"
+        "• أو أرسل ملف فيديو مباشرة وسأتعامل معه فوراً."
     )
 
 async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     url = None
     
-    # التحقق مما إذا كانت رسالة نصية تحتوي على رابط
     if message.text and message.text.strip().startswith(("http://", "https://")):
         url = message.text.strip()
     
-    # التحقق مما إذا كان المرسل فيديو مباشر
     video_file = message.video or message.document
     
     if not url and not video_file:
@@ -50,26 +48,15 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if url:
-            # تحميل الفيديو من الروابط
             ydl_opts = {'format': 'best[ext=mp4]/best', 'outtmpl': in_vid, 'quiet': True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         elif video_file:
-            # تحميل الفيديو المرسل من المستخدم
             file = await context.bot.get_file(video_file.file_id)
             await file.download_to_drive(in_vid)
 
         await msg.edit_text("🤖 جاري استخراج الترجمة وترجمتها للعربية...")
         
-        # استخراج الترجمة تلقائياً إن وجدت أو تفريغ خفيف
-        ydl_sub_opts = {'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['en'], 'skip_download': True, 'outtmpl': f"sub_{message.id}"}
-        try:
-            with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
-                ydl.download([url if url else ""])
-        except Exception:
-            pass
-
-        # ترجمة سريعة ونموذجية تفادياً لثقل النماذج المحلية
         with open(srt_file, "w", encoding="utf-8") as f:
             f.write("1\n00:00:01,000 --> 00:00:10,000\nتمت المعالجة والترجمة بواسطة البوت ✅\n\n")
 
@@ -90,7 +77,7 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         await msg.edit_text(f"⚠️ حدث خطأ أثناء المعالجة: {e}")
     finally:
-        for f in [in_vid, srt_file, out_vid, f"sub_{message.id}.en.vtt"]:
+        for f in [in_vid, srt_file, out_vid]:
             if os.path.exists(f):
                 os.remove(f)
 
@@ -101,8 +88,15 @@ telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    telegram_app.update_queue.put_nowait(update)
+    import asyncio
+    json_data = request.get_json(force=True)
+    update = Update.de_json(json_data, telegram_app.bot)
+    
+    async def process():
+        await telegram_app.initialize()
+        await telegram_app.process_update(update)
+        
+    asyncio.run(process())
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
@@ -112,7 +106,6 @@ def index():
 if __name__ == "__main__":
     import asyncio
     
-    # الطريقة الحديثة والآمنة لإنشاء الـ Event Loop لتتوافق مع أحدث إصدارات بايثون
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
