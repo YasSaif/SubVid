@@ -1,0 +1,4 @@
+openai-whisper
+python-telegram-bot
+deep-translator
+yt-dlp
