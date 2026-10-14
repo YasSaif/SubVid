@@ -10,7 +10,8 @@ from deep_translator import GoogleTranslator
 
 nest_asyncio.apply()
 
-TOKEN = "8947656701:AAEnqZk4wc7PHUCQHmQ4BGuqfX_VWW3LVFk"
+# قراءة التوكن بأمان من إعدادات السيرفر
+TOKEN = os.environ.get("TOKEN")
 
 print("⏳ جاري تحميل نموذج الذكاء الاصطناعي...")
 model = whisper.load_model("tiny")
