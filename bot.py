@@ -8,11 +8,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
-# تأكد أن الرابط هنا لا ينتهي بـ /
 WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 
 app_flask = Flask(__name__)
 
+# بناء تطبيق تيليجرام
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,19 +79,22 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
 
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-loop.run_until_complete(telegram_app.initialize())
-
+# مسار استقبال الويب هوك من تيليجرام
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, telegram_app.bot)
-    future = asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
     try:
-        future.result(timeout=30)
-    except Exception:
-        pass
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, telegram_app.bot)
+        
+        # تشغيل التحديث بشكل مباشر وآمن
+        async def process():
+            async with telegram_app:
+                await telegram_app.process_update(update)
+                
+        asyncio.run(process())
+    except Exception as e:
+        print(f"Error processing update: {e}")
+        
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
@@ -101,7 +104,14 @@ def index():
 if __name__ == "__main__":
     if WEBHOOK_URL:
         webhook_link = f"{WEBHOOK_URL}/{TOKEN}"
-        loop.run_until_complete(telegram_app.bot.set_webhook(url=webhook_link))
-        print(f"Webhook set to: {webhook_link}")
+        
+        async def setup_webhook():
+            async with telegram_app:
+                # حذف أي ويب هوك قديم وإعادة ضبطه من الصفر
+                await telegram_app.bot.delete_webhook(drop_pending_updates=True)
+                await telegram_app.bot.set_webhook(url=webhook_link)
+                print(f"Webhook successfully forced to: {webhook_link}")
+                
+        asyncio.run(setup_webhook())
         
     app_flask.run(host="0.0.0.0", port=PORT)
