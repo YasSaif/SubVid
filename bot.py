@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
 # رابط استضافتك على Render بعد ربطه (سيظهر لك رابط الـ Web Service الخاص بك)
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+WEBHOOKURL = os.environ.get("WEBHOOKURL", "")
 
 app_flask = Flask(__name__)
 
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     import asyncio
     asyncio.get_event_loop().run_until_complete(telegram_app.initialize())
     
-    if WEBHOOK_URL:
-        asyncio.get_event_loop().run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}"))
+    if WEBHOOKURL:
+        asyncio.get_event_loop().run_until_complete(telegram_app.bot.set_webhook(url=f"{WEBHOOKURL}/{TOKEN}"))
     
     app_flask.run(host="0.0.0.0", port=PORT)
