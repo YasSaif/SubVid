@@ -5,37 +5,39 @@ import yt_dlp
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from faster_whisper import WhisperModel
+from deep_translator import GoogleTranslator
 
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
 WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 
 app_flask = Flask(__name__)
-
 telegram_app = ApplicationBuilder().token(TOKEN).build()
+
+# تحميل نموذج Whisper المصغر (Tiny) ليستهلك أقل قدر ممكن من الرام (RAM)
+# device="cpu" لأن استضافاتنا مجانية وتعمل على المعالج العادي
+whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً بك في SubVid Ai 🎬✨\n\n"
-        "• أرسل لي **رابط مقطع** من أي منصة (تيك توك، يوتيوب، إلخ) أو **ملف فيديو مباشر**، وسأخيرك بين دمج الترجمة على الفيديو أو استخراج النص المترجم فقط."
+        "أهلاً بك في SubVid Ai الاحترافي 🎬✨\n\n"
+        "• أرسل لي **رابط مقطع** (تيك توك، يوتيوب، إلخ) أو **ملف فيديو مباشر**، وسأخيرك بين دمج الترجمة المزمنة أو استخراج النص!"
     )
 
 async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     url = None
     
-    # التحقق مما إذا كانت الرسالة تحتوي على رابط
     if message.text and message.text.strip().startswith(("http://", "https://")):
         url = message.text.strip()
     
-    # التحقق مما إذا كانت الرسالة تحتوي على ملف فيديو مباشر
     video_file = message.video or message.document
     
     if not url and not video_file:
         await message.reply_text("⚠️ يرجى إرسال رابط صالح أو ملف فيديو.")
         return
 
-    # حفظ الرابط أو معرف الملف مؤقتاً في الـ context
     if url:
         context.user_data['input_type'] = 'url'
         context.user_data['input_data'] = url
@@ -43,9 +45,8 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['input_type'] = 'file'
         context.user_data['input_data'] = video_file.file_id
 
-    # إرسال الخيارات التفاعلية للمستخدم كما طلبت
     keyboard = [
-        [InlineKeyboardButton("🎬 ترجمة المقطع ودمجها عليه (ومزامنتها)", callback_data="opt_embed_sub")],
+        [InlineKeyboardButton("🎬 ترجمة المقطع ودمجها (ومزامنتها كالأفلام)", callback_data="opt_embed_sub")],
         [InlineKeyboardButton("📝 استخراج الترجمة النصية فقط", callback_data="opt_text_only")],
         [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
     ]
@@ -55,6 +56,42 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
         "🎯 تم استلام المقطع بنجاح!\nماذا تفضل أن أفعل به؟",
         reply_markup=reply_markup
     )
+
+def seconds_to_srt_time(seconds):
+    """تحويل الثواني إلى صيغة توقيت ملف الـ SRT (00:00:00,000)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    milliseconds = int(int((seconds - int(seconds)) * 1000))
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+async def process_audio_to_subtitles(audio_path):
+    """تفريغ الصوت باستخدام Whisper وترجمته للعربية وإنشاء محتوى SRT"""
+    segments, info = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
+    
+    srt_content = ""
+    full_text_list = []
+    
+    for i, segment in enumerate(segments, start=1):
+        start_str = seconds_to_srt_time(segment.start)
+        end_str = seconds_to_srt_time(segment.end)
+        english_text = segment.text.strip()
+        
+        if not english_text:
+            continue
+            
+        # ترجمة الجملة فوراً للعربية عبر GoogleTranslator
+        try:
+            arabic_text = GoogleTranslator(source='auto', target='ar').translate(english_text)
+        except Exception:
+            arabic_text = english_text
+            
+        full_text_list.append(arabic_text)
+        
+        # بناء هيكل ملف الـ SRT الزمني
+        srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
+        
+    return srt_content, "\n".join(full_text_list)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -69,18 +106,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not input_data:
-        await query.edit_message_text("⚠️ انتهت صلاحية الطلب، يرجى إرسال الرابط أو الفيديو مرة أخرى.")
+        await query.edit_message_text("⚠️ انتهت صلاحية الطلب، يرجى إرسال الرابط أو الفيديو من جديد.")
         return
 
-    # الخيار الأول: ترجمة المقطع ودمجها عليه
-    if data == "opt_embed_sub":
-        await query.edit_message_text("⏳ جاري تحميل الفيديو ودمج الترجمة العربية وتعديل المزامنة...")
-        
-        in_vid = f"in_{query.id}.mp4"
-        srt_file = f"sub_{query.id}.srt"
-        out_vid = f"out_{query.id}.mp4"
+    in_vid = f"in_{query.id}.mp4"
+    audio_file = f"audio_{query.id}.mp3"
+    srt_file = f"sub_{query.id}.srt"
+    out_vid = f"out_{query.id}.mp4"
 
-        try:
+    try:
+        if data == "opt_embed_sub":
+            await query.edit_message_text("⏳ جاري تحميل الفيديو، تفريغ الصوت بالذكاء الاصطناعي، وترجمته ودمجه...")
+            
             if input_type == 'url':
                 ydl_opts = {
                     'format': 'best[ext=mp4]/best',
@@ -98,10 +135,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file = await context.bot.get_file(input_data)
                 await file.download_to_drive(in_vid)
 
-            # إنشاء ملف ترجمة تجريبي/افتراضي مزامن
-            with open(srt_file, "w", encoding="utf-8") as f:
-                f.write("1\n00:00:01,000 --> 00:00:06,000\nتمت ترجمة ومزامنة المقطع بنجاح ✅\n\n")
+            # استخلاص الصوت الصافي من الفيديو باستخدام FFmpeg
+            subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+            # تفريغ الصوت وإنشاء ملف الترجمة المتزامن
+            srt_content, _ = await process_audio_to_subtitles(audio_file)
+            
+            if not srt_content.strip():
+                await query.message.reply_text("⚠️ لم يتم رصد كلمات واضحة في المقطع لمعالجتها.")
+                return
+
+            with open(srt_file, "w", encoding="utf-8") as f:
+                f.write(srt_content)
+
+            # حرق الترجمة على الفيديو بشكل دائم واحترافي
             cmd = [
                 "ffmpeg", "-y", "-i", in_vid,
                 "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
@@ -110,24 +157,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة ومزامنتها ✅")
-            
-        except Exception as e:
-            await query.message.reply_text(f"⚠️ حدث خطأ أثناء المعالجة: {e}")
-        finally:
-            for f in [in_vid, srt_file, out_vid]:
-                if os.path.exists(f):
-                    os.remove(f)
+            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة ومزامنتها بنجاح ✅🎬")
 
-    # الخيار الثاني: استخراج الترجمة النصية فقط
-    elif data == "opt_text_only":
-        await query.edit_message_text("⏳ جاري تحليل الصوت واستخراج الترجمة النصية...")
-        try:
-            # هنا يمكنك لاحقاً جلب النص الفعلي، حالياً نرسل نص تجريبي كمثال للاستجابة
-            extracted_text = "📝 هذه هي الترجمة النصية المستخرجة من الفيديو:\n\n- أهلاً بك، هذا نص تجريبي مستخرج من المقطع المراد ترجمته.\n- سيتم جلب التفاصيل الكاملة بدقة."
-            await query.message.reply_text(extracted_text)
-        except Exception as e:
-            await query.message.reply_text(f"⚠️ حدث خطأ أثناء استخراج النص: {e}")
+        elif data == "opt_text_only":
+            await query.edit_message_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية وترجمتها...")
+            
+            if input_type == 'url':
+                ydl_opts = {
+                    'format': 'best[ext=mp4]/best',
+                    'outtmpl': in_vid,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extractor_args': {'tiktok': {'web_api': 'v2'}},
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([input_data])
+            elif input_type == 'file':
+                file = await context.bot.get_file(input_data)
+                await file.download_to_drive(in_vid)
+
+            subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            _, full_text = await process_audio_to_subtitles(audio_file)
+
+            if full_text.strip():
+                await query.message.reply_text(f"📝 **الترجمة النصية المستخرجة من المقطع:**\n\n{full_text[:4000]}")
+            else:
+                await query.message.reply_text("⚠️ لم يتم العثور على نصوص واضحة في الصوت.")
+
+    except Exception as e:
+        await query.message.reply_text(f"⚠️ حدث خطأ أثناء معالجة الطلب: {e}")
+    finally:
+        # تنظيف الملفات المؤقتة من السيرفر لتوفير المساحة والذاكرة
+        for f in [in_vid, audio_file, srt_file, out_vid]:
+            if os.path.exists(f):
+                os.remove(f)
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
@@ -146,7 +213,6 @@ def webhook():
         asyncio.run(process())
     except Exception as e:
         print(f"Error processing update: {e}")
-        
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
