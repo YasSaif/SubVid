@@ -47,7 +47,7 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
     keyboard = [
         [InlineKeyboardButton("🎬 ترجمة المقطع ودمجها (ومزامنتها كالأفلام)", callback_data="opt_embed_sub")],
-        [InlineKeyboardButton("📝 استخراج الترجمة النصية فقط", callback_data="opt_text_only")],
+        [InlineKeyboardButton("📝 استخراج النص (الأصلي + المترجم)", callback_data="opt_text_only")],
         [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -68,7 +68,8 @@ def process_audio_to_subtitles(audio_path):
     segments, _ = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
     
     srt_content = ""
-    full_text_list = []
+    dual_text_list = []
+    translator = GoogleTranslator(source='auto', target='ar')
     
     for i, segment in enumerate(segments, start=1):
         start_str = seconds_to_srt_time(segment.start)
@@ -79,14 +80,19 @@ def process_audio_to_subtitles(audio_path):
             continue
             
         try:
-            arabic_text = GoogleTranslator(source='auto', target='ar').translate(english_text)
+            arabic_text = translator.translate(english_text)
+            if not arabic_text:
+                arabic_text = english_text
         except Exception:
             arabic_text = english_text
             
-        full_text_list.append(arabic_text)
+        # للدمج في الفيديو نضع الترجمة العربية فقط لتبقى واضحة ونظيفة
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
         
-    return srt_content, "\n".join(full_text_list)
+        # لتنسيق النص الثنائي (الأصلي + المترجم)
+        dual_text_list.append(f"en: {english_text}\nar: {arabic_text}\n")
+        
+    return srt_content, "\n".join(dual_text_list)
 
 async def download_video_safely(input_data, out_filename):
     base_name = out_filename.replace('.mp4', '')
@@ -137,7 +143,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if data == "opt_embed_sub":
-            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة...")
+            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة العربية...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
@@ -167,10 +173,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة ومزامنتها بنجاح ✅🎬")
+            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية ومزامنتها بنجاح ✅🎬")
 
         elif data == "opt_text_only":
-            await query.message.reply_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية...")
+            await query.message.reply_text("⏳ جاري استخراج النص الأصلي والمترجم...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
@@ -183,10 +189,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            _, full_text = process_audio_to_subtitles(audio_file)
+            _, dual_text = process_audio_to_subtitles(audio_file)
 
-            if full_text.strip():
-                await query.message.reply_text(f"📝 **الترجمة النصية المستخرجة من المقطع:**\n\n{full_text[:4000]}")
+            if dual_text.strip():
+                await query.message.reply_text(f"📝 **النصوص المستخرجة (الإنجليزي + الترجمة العربية):**\n\n{dual_text[:4000]}")
             else:
                 await query.message.reply_text("⚠️ لم يتم العثور على نصوص واضحة في الصوت.")
 
@@ -196,7 +202,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.message.reply_text(f"⚠️ **خطأ تقني تفصيلي:**\n`{str(e)}`\n\n`{error_details[:3000]}`", parse_mode="Markdown")
         except Exception:
-            await query.message.reply_text(f"⚠️ حدث خطأ غير متوقع: {str(e)}")
+            pass
     finally:
         for f in [in_vid, audio_file, srt_file, out_vid]:
             if os.path.exists(f):
