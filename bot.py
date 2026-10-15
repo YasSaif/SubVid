@@ -15,8 +15,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 app_flask = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-# تحميل نموذج Whisper المصغر (Tiny) ليستهلك أقل قدر ممكن من الرام (RAM)
-# device="cpu" لأن استضافاتنا مجانية وتعمل على المعالج العادي
+# تحميل نموذج Whisper المصغر (Tiny)
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,7 +57,6 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 def seconds_to_srt_time(seconds):
-    """تحويل الثواني إلى صيغة توقيت ملف الـ SRT (00:00:00,000)"""
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = int(seconds % 60)
@@ -66,7 +64,6 @@ def seconds_to_srt_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 async def process_audio_to_subtitles(audio_path):
-    """تفريغ الصوت باستخدام Whisper وترجمته للعربية وإنشاء محتوى SRT"""
     segments, info = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
     
     srt_content = ""
@@ -80,18 +77,33 @@ async def process_audio_to_subtitles(audio_path):
         if not english_text:
             continue
             
-        # ترجمة الجملة فوراً للعربية عبر GoogleTranslator
         try:
             arabic_text = GoogleTranslator(source='auto', target='ar').translate(english_text)
         except Exception:
             arabic_text = english_text
             
         full_text_list.append(arabic_text)
-        
-        # بناء هيكل ملف الـ SRT الزمني
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
         
     return srt_content, "\n".join(full_text_list)
+
+async def download_video_safely(input_type, input_data, out_filename):
+    """تحميل الفيديو بطريقة آمنة ومستقرة تتخطى مشاكل المنصات"""
+    if input_type == 'url':
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': out_filename,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True,
+            'extractor_args': {'tiktok': {'web_api': 'v2'}},
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([input_data])
+    return os.path.exists(out_filename)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -119,26 +131,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⏳ جاري تحميل الفيديو، تفريغ الصوت بالذكاء الاصطناعي، وترجمته ودمجه...")
             
             if input_type == 'url':
-                ydl_opts = {
-                    'format': 'best[ext=mp4]/best',
-                    'outtmpl': in_vid,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extractor_args': {'tiktok': {'web_api': 'v2'}},
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([input_data])
+                success = await download_video_safely(input_type, input_data, in_vid)
+                if not success:
+                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
+                    return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
                 await file.download_to_drive(in_vid)
 
-            # استخلاص الصوت الصافي من الفيديو باستخدام FFmpeg
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # تفريغ الصوت وإنشاء ملف الترجمة المتزامن
             srt_content, _ = await process_audio_to_subtitles(audio_file)
             
             if not srt_content.strip():
@@ -148,7 +150,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(srt_file, "w", encoding="utf-8") as f:
                 f.write(srt_content)
 
-            # حرق الترجمة على الفيديو بشكل دائم واحترافي
             cmd = [
                 "ffmpeg", "-y", "-i", in_vid,
                 "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
@@ -163,18 +164,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية وترجمتها...")
             
             if input_type == 'url':
-                ydl_opts = {
-                    'format': 'best[ext=mp4]/best',
-                    'outtmpl': in_vid,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extractor_args': {'tiktok': {'web_api': 'v2'}},
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    }
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([input_data])
+                success = await download_video_safely(input_type, input_data, in_vid)
+                if not success:
+                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
+                    return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
                 await file.download_to_drive(in_vid)
@@ -191,7 +184,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.message.reply_text(f"⚠️ حدث خطأ أثناء معالجة الطلب: {e}")
     finally:
-        # تنظيف الملفات المؤقتة من السيرفر لتوفير المساحة والذاكرة
         for f in [in_vid, audio_file, srt_file, out_vid]:
             if os.path.exists(f):
                 os.remove(f)
