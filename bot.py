@@ -27,7 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    if message.from_user and message.from_user.is_bot:
+    if not message or not message.from_user or message.from_user.is_bot:
         return
         
     url = None
@@ -186,7 +186,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(srt_file, "w", encoding="utf-8") as f:
                 f.write(srt_content)
 
-            # حجم خط مناسب ومتناسق غير مغطٍ للشاشة
             cmd = [
                 "ffmpeg", "-y", "-i", in_vid,
                 "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
@@ -233,7 +232,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(f)
 
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND & ~filters.User(is_bot=True), handle_media_or_link))
+telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
 telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
