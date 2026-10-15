@@ -7,7 +7,6 @@ from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from faster_whisper import WhisperModel
-from deep_translator import GoogleTranslator
 
 TOKEN = os.environ.get("TOKEN")
 PORT = int(os.environ.get("PORT", "10000"))
@@ -49,7 +48,7 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
     keyboard = [
         [InlineKeyboardButton("دمج الترجمة العربية بالفيديو", callback_data="opt_embed_sub")],
-        [InlineKeyboardButton("استخراج الترجمة النصية (الأصلي والمترجم)", callback_data="opt_text_only")],
+        [InlineKeyboardButton("استخراج الترجمة النصية (المترجمة بالعربية)", callback_data="opt_text_only")],
         [InlineKeyboardButton("إلغاء", callback_data="cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -66,45 +65,31 @@ def seconds_to_srt_time(seconds):
     milliseconds = int(int((seconds - int(seconds)) * 1000))
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-def translate_to_arabic(text):
-    if not text.strip():
-        return text
-    try:
-        # محاولة الترجمة عبر GoogleTranslator مع تحديد المصدر والهدف بدقة
-        translator = GoogleTranslator(source='en', target='ar')
-        translated = translator.translate(text)
-        if translated and translated.strip():
-            return translated.strip()
-    except Exception as e:
-        print(f"Translation error: {e}")
-    return text
-
-def process_audio_to_subtitles(audio_path):
+def process_audio_to_arabic_subtitles(audio_path):
+    # استخدام ترجمة Whisper الداخلية مباشرة للغة العربية
     segments, _ = whisper_model.transcribe(
         audio_path, 
         beam_size=1, 
         vad_filter=True, 
         condition_on_previous_text=False,
-        task="transcribe"
+        task="translate"
     )
     
     srt_content = ""
-    dual_text_list = []
+    text_list = []
     
     for i, segment in enumerate(segments, start=1):
         start_str = seconds_to_srt_time(segment.start)
         end_str = seconds_to_srt_time(segment.end)
-        english_text = segment.text.strip()
+        arabic_text = segment.text.strip()
         
-        if not english_text:
+        if not arabic_text:
             continue
             
-        arabic_text = translate_to_arabic(english_text)
-            
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
-        dual_text_list.append(f"en: {english_text}\nar: {arabic_text}\n")
+        text_list.append(arabic_text)
         
-    return srt_content, "\n".join(dual_text_list)
+    return srt_content, "\n".join(text_list)
 
 async def download_video_safely(input_data, out_filename):
     base_name = out_filename.replace('.mp4', '')
@@ -170,7 +155,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if data == "opt_embed_sub":
-            status_msg = await query.message.reply_text("جاري معالجة الفيديو ودمج الترجمة...")
+            status_msg = await query.message.reply_text("جاري معالجة الفيديو ودمج الترجمة العربية...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
@@ -183,7 +168,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            srt_content, _ = process_audio_to_subtitles(audio_file)
+            srt_content, _ = process_audio_to_arabic_subtitles(audio_file)
             
             if not srt_content.strip():
                 await status_msg.edit_text("لم يتم رصد نصوص واضحة في المقطع.")
@@ -204,7 +189,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.delete()
 
         elif data == "opt_text_only":
-            status_msg = await query.message.reply_text("جاري استخراج وترجمة النصوص...")
+            status_msg = await query.message.reply_text("جاري استخراج الترجمة العربية...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
@@ -217,10 +202,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            _, dual_text = process_audio_to_subtitles(audio_file)
+            _, arabic_text = process_audio_to_arabic_subtitles(audio_file)
 
-            if dual_text.strip():
-                await query.message.reply_text(f"النصوص المستخرجة:\n\n{dual_text[:4000]}")
+            if arabic_text.strip():
+                await query.message.reply_text(f"النصوص المترجمة للعربية:\n\n{arabic_text[:4000]}")
                 await status_msg.delete()
             else:
                 await status_msg.edit_text("لم يتم العثور على نصوص واضحة في الصوت.")
