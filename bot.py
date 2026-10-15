@@ -16,7 +16,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 app_flask = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-# تحميل نموذج Whisper المصغر
+# تحميل نموذج Whisper المصغر بأعلى سرعة معالجة
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,7 +65,14 @@ def seconds_to_srt_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 def process_audio_to_subtitles(audio_path):
-    segments, _ = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
+    # إعدادات فائقة السرعة للتفريغ
+    segments, _ = whisper_model.transcribe(
+        audio_path, 
+        beam_size=1, 
+        vad_filter=True, 
+        condition_on_previous_text=False,
+        task="transcribe"
+    )
     
     srt_content = ""
     dual_text_list = []
@@ -87,10 +94,7 @@ def process_audio_to_subtitles(audio_path):
         except Exception:
             pass
             
-        # للدمج في الفيديو نضع الترجمة العربية فقط
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
-        
-        # لتنسيق النص الثنائي (الأصلي + المترجم)
         dual_text_list.append(f"en: {english_text}\nar: {arabic_text}\n")
         
     return srt_content, "\n".join(dual_text_list)
@@ -123,18 +127,29 @@ async def download_video_safely(input_data, out_filename):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # الرد الفوري لمنع انتهاء الصلاحية
+    
+    # حماية استجابة الزر من انتهاء الصلاحية
+    try:
+        await query.answer()
+    except Exception:
+        pass
     
     data = query.data
     input_type = context.user_data.get('input_type')
     input_data = context.user_data.get('input_data')
 
     if data == "cancel":
-        await query.edit_message_text("❌ تم إلغاء العملية.")
+        try:
+            await query.edit_message_text("❌ تم إلغاء العملية.")
+        except Exception:
+            pass
         return
 
     if not input_data:
-        await query.edit_message_text("⚠️ انتهت صلاحية الطلب، يرجى إرسال الرابط أو الفيديو من جديد.")
+        try:
+            await query.edit_message_text("⚠️ انتهت صلاحية الطلب، يرجى إرسال الرابط أو الفيديو من جديد.")
+        except Exception:
+            pass
         return
 
     in_vid = f"in_{query.id}.mp4"
@@ -144,7 +159,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if data == "opt_embed_sub":
-            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة العربية...")
+            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة العربية بسرعة فائقة...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
@@ -174,10 +189,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية ومزامنتها بنجاح ✅🎬")
+            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية بنجاح ✅🎬")
 
         elif data == "opt_text_only":
-            await query.message.reply_text("⏳ جاري استخراج وترجمة النص الأصلي والمترجم...")
+            await query.message.reply_text("⏳ جاري استخراج وترجمة النص الأصلي والمترجم بسرعة...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
