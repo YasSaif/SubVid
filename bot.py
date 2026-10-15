@@ -87,23 +87,29 @@ async def process_audio_to_subtitles(audio_path):
         
     return srt_content, "\n".join(full_text_list)
 
-async def download_video_safely(input_type, input_data, out_filename):
-    """تحميل الفيديو بطريقة آمنة ومستقرة تتخطى مشاكل المنصات"""
-    if input_type == 'url':
-        ydl_opts = {
-            'format': 'best',
-            'outtmpl': out_filename,
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'extractor_args': {'tiktok': {'web_api': 'v2'}},
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        }
+async def download_video_safely(input_data, out_filename):
+    """تحميل الفيديو بأبسط إعدادات ممكنة لتجنب أي أخطاء في الـ metadata"""
+    ydl_opts = {
+        'outtmpl': out_filename.replace('.mp4', ''),
+        'format': 'mp4/best',
+        'quiet': True,
+        'no_warnings': True,
+    }
+    try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([input_data])
-    return os.path.exists(out_filename)
+        
+        # التأكد من صيغة الملف الناتج وإعادة تسميته لـ .mp4 إذا لزم الأمر
+        base_name = out_filename.replace('.mp4', '')
+        for ext in ['.mp4', '.mkv', '.webm', '.mov']:
+            if os.path.exists(base_name + ext):
+                if base_name + ext != out_filename:
+                    os.rename(base_name + ext, out_filename)
+                break
+        return os.path.exists(out_filename)
+    except Exception as e:
+        print(f"Download error: {e}")
+        return False
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -131,7 +137,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⏳ جاري تحميل الفيديو، تفريغ الصوت بالذكاء الاصطناعي، وترجمته ودمجه...")
             
             if input_type == 'url':
-                success = await download_video_safely(input_type, input_data, in_vid)
+                success = await download_video_safely(input_data, in_vid)
                 if not success:
                     await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
                     return
@@ -164,7 +170,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية وترجمتها...")
             
             if input_type == 'url':
-                success = await download_video_safely(input_type, input_data, in_vid)
+                success = await download_video_safely(input_data, in_vid)
                 if not success:
                     await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
                     return
