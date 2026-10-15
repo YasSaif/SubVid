@@ -15,7 +15,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 app_flask = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-# تحميل نموذج Whisper المصغر مع تثبيت خيارات المعالجة الآمنة
+# تحميل نموذج Whisper المصغر
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -64,7 +64,6 @@ def seconds_to_srt_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 def process_audio_to_subtitles(audio_path):
-    """تفريغ الصوت بشكل آمن بعيداً عن أخطاء مكتبات الـ metadata الداخلية"""
     segments, _ = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
     
     srt_content = ""
@@ -209,6 +208,7 @@ def webhook():
         
         async def process():
             async with telegram_app:
+                await telegram_app.initialize()
                 await telegram_app.process_update(update)
                 
         asyncio.run(process())
@@ -226,6 +226,7 @@ if __name__ == "__main__":
         
         async def setup_webhook():
             async with telegram_app:
+                await telegram_app.initialize()
                 await telegram_app.bot.delete_webhook(drop_pending_updates=True)
                 await telegram_app.bot.set_webhook(url=webhook_link)
                 print(f"Webhook successfully forced to: {webhook_link}")
