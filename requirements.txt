@@ -1,5 +1,6 @@
+Flask
 python-telegram-bot
 yt-dlp
+faster-whisper
 deep-translator
 requests
-Flask
