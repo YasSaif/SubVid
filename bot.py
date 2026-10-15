@@ -1,6 +1,7 @@
 import os
 import subprocess
 import asyncio
+import traceback
 import yt_dlp
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -190,7 +191,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("⚠️ لم يتم العثور على نصوص واضحة في الصوت.")
 
     except Exception as e:
-        await query.message.reply_text(f"⚠️ حدث خطأ أثناء معالجة الطلب: {e}")
+        error_details = traceback.format_exc()
+        print(error_details)
+        try:
+            await query.message.reply_text(f"⚠️ **خطأ تقني تفصيلي:**\n`{str(e)}`\n\n`{error_details[:3000]}`", parse_mode="Markdown")
+        except Exception:
+            await query.message.reply_text(f"⚠️ حدث خطأ غير متوقع: {str(e)}")
     finally:
         for f in [in_vid, audio_file, srt_file, out_vid]:
             if os.path.exists(f):
@@ -208,12 +214,13 @@ def webhook():
         
         async def process():
             async with telegram_app:
-                await telegram_app.initialize()
+                if not telegram_app.running:
+                    await telegram_app.initialize()
                 await telegram_app.process_update(update)
                 
         asyncio.run(process())
     except Exception as e:
-        print(f"Error processing update: {e}")
+        print(f"Webhook Error: {traceback.format_exc()}")
     return "OK"
 
 @app_flask.route("/", methods=["GET"])
