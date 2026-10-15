@@ -4,3 +4,4 @@ yt-dlp
 faster-whisper
 deep-translator
 requests
+av<19
