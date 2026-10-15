@@ -15,13 +15,13 @@ WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 app_flask = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-# تحميل نموذج Whisper المصغر (Tiny)
+# تحميل نموذج Whisper المصغر مع تثبيت خيارات المعالجة الآمنة
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك في SubVid Ai الاحترافي 🎬✨\n\n"
-        "• أرسل لي **رابط مقطع** (تيك توك، يوتيوب، إلخ) أو **ملف فيديو مباشر**، وسأخيرك بين دمج الترجمة المزمنة أو استخراج النص!"
+        "• أرسل لي **رابط مقطع** أو **ملف فيديو مباشر**، وسأخيرك بين دمج الترجمة المزمنة أو استخراج النص!"
     )
 
 async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -63,8 +63,9 @@ def seconds_to_srt_time(seconds):
     milliseconds = int(int((seconds - int(seconds)) * 1000))
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-async def process_audio_to_subtitles(audio_path):
-    segments, info = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
+def process_audio_to_subtitles(audio_path):
+    """تفريغ الصوت بشكل آمن بعيداً عن أخطاء مكتبات الـ metadata الداخلية"""
+    segments, _ = whisper_model.transcribe(audio_path, beam_size=1, task="transcribe")
     
     srt_content = ""
     full_text_list = []
@@ -88,19 +89,21 @@ async def process_audio_to_subtitles(audio_path):
     return srt_content, "\n".join(full_text_list)
 
 async def download_video_safely(input_data, out_filename):
-    """تحميل الفيديو بأبسط إعدادات ممكنة لتجنب أي أخطاء في الـ metadata"""
+    base_name = out_filename.replace('.mp4', '')
     ydl_opts = {
-        'outtmpl': out_filename.replace('.mp4', ''),
-        'format': 'mp4/best',
+        'outtmpl': base_name,
+        'format': 'best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {'tiktok': {'web_api': 'v2'}},
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([input_data])
         
-        # التأكد من صيغة الملف الناتج وإعادة تسميته لـ .mp4 إذا لزم الأمر
-        base_name = out_filename.replace('.mp4', '')
         for ext in ['.mp4', '.mkv', '.webm', '.mov']:
             if os.path.exists(base_name + ext):
                 if base_name + ext != out_filename:
@@ -134,12 +137,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if data == "opt_embed_sub":
-            await query.edit_message_text("⏳ جاري تحميل الفيديو، تفريغ الصوت بالذكاء الاصطناعي، وترجمته ودمجه...")
+            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
                 if not success:
-                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
+                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط.")
                     return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
@@ -147,10 +150,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            srt_content, _ = await process_audio_to_subtitles(audio_file)
+            srt_content, _ = process_audio_to_subtitles(audio_file)
             
             if not srt_content.strip():
-                await query.message.reply_text("⚠️ لم يتم رصد كلمات واضحة في المقطع لمعالجتها.")
+                await query.message.reply_text("⚠️ لم يتم رصد كلمات واضحة في المقطع.")
                 return
 
             with open(srt_file, "w", encoding="utf-8") as f:
@@ -167,12 +170,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة ومزامنتها بنجاح ✅🎬")
 
         elif data == "opt_text_only":
-            await query.edit_message_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية وترجمتها...")
+            await query.message.reply_text("⏳ جاري تفريغ الصوت واستخراج الترجمة النصية...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
                 if not success:
-                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط، تأكد من صحته.")
+                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط.")
                     return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
@@ -180,7 +183,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            _, full_text = await process_audio_to_subtitles(audio_file)
+            _, full_text = process_audio_to_subtitles(audio_file)
 
             if full_text.strip():
                 await query.message.reply_text(f"📝 **الترجمة النصية المستخرجة من المقطع:**\n\n{full_text[:4000]}")
