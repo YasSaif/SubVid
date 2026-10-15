@@ -69,7 +69,7 @@ def process_audio_to_subtitles(audio_path):
     
     srt_content = ""
     dual_text_list = []
-    translator = GoogleTranslator(source='auto', target='ar')
+    translator = GoogleTranslator(source='en', target='ar')
     
     for i, segment in enumerate(segments, start=1):
         start_str = seconds_to_srt_time(segment.start)
@@ -79,14 +79,15 @@ def process_audio_to_subtitles(audio_path):
         if not english_text:
             continue
             
+        arabic_text = english_text
         try:
-            arabic_text = translator.translate(english_text)
-            if not arabic_text:
-                arabic_text = english_text
+            translated = translator.translate(english_text)
+            if translated:
+                arabic_text = translated
         except Exception:
-            arabic_text = english_text
+            pass
             
-        # للدمج في الفيديو نضع الترجمة العربية فقط لتبقى واضحة ونظيفة
+        # للدمج في الفيديو نضع الترجمة العربية فقط
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
         
         # لتنسيق النص الثنائي (الأصلي + المترجم)
@@ -122,7 +123,7 @@ async def download_video_safely(input_data, out_filename):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer() # الرد الفوري لمنع انتهاء الصلاحية
     
     data = query.data
     input_type = context.user_data.get('input_type')
@@ -176,7 +177,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية ومزامنتها بنجاح ✅🎬")
 
         elif data == "opt_text_only":
-            await query.message.reply_text("⏳ جاري استخراج النص الأصلي والمترجم...")
+            await query.message.reply_text("⏳ جاري استخراج وترجمة النص الأصلي والمترجم...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
