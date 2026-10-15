@@ -16,26 +16,28 @@ WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
 app_flask = Flask(__name__)
 telegram_app = ApplicationBuilder().token(TOKEN).build()
 
-# تحميل نموذج Whisper المصغر بأعلى سرعة معالجة
+# تحميل نموذج Whisper المصغر بأقصى كفاءة وسرعة
 whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً بك في SubVid Ai الاحترافي 🎬✨\n\n"
-        "• أرسل لي **رابط مقطع** أو **ملف فيديو مباشر**، وسأخيرك بين دمج الترجمة المزمنة أو استخراج النص!"
+        "مرحباً بك في خدمة SubVid Ai.\n\n"
+        "• يرجى إرسال رابط مقطع مرئي أو ملف فيديو مباشر للبدء."
     )
 
 async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    if message.from_user and message.from_user.is_bot:
+        return
+        
     url = None
-    
     if message.text and message.text.strip().startswith(("http://", "https://")):
         url = message.text.strip()
     
     video_file = message.video or message.document
     
     if not url and not video_file:
-        await message.reply_text("⚠️ يرجى إرسال رابط صالح أو ملف فيديو.")
+        await message.reply_text("الرجاء إرسال رابط صالح أو ملف فيديو.")
         return
 
     if url:
@@ -46,14 +48,14 @@ async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['input_data'] = video_file.file_id
 
     keyboard = [
-        [InlineKeyboardButton("🎬 ترجمة المقطع ودمجها (ومزامنتها كالأفلام)", callback_data="opt_embed_sub")],
-        [InlineKeyboardButton("📝 استخراج النص (الأصلي + المترجم)", callback_data="opt_text_only")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")]
+        [InlineKeyboardButton("دمج الترجمة العربية بالفيديو", callback_data="opt_embed_sub")],
+        [InlineKeyboardButton("استخراج الترجمة النصية (الأصلي والمترجم)", callback_data="opt_text_only")],
+        [InlineKeyboardButton("إلغاء", callback_data="cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await message.reply_text(
-        "🎯 تم استلام المقطع بنجاح!\nماذا تفضل أن أفعل به؟",
+        "تم استلام الملف بنجاح. يرجى اختيار الإجراء المطلوب:",
         reply_markup=reply_markup
     )
 
@@ -65,7 +67,6 @@ def seconds_to_srt_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 def process_audio_to_subtitles(audio_path):
-    # إعدادات فائقة السرعة للتفريغ
     segments, _ = whisper_model.transcribe(
         audio_path, 
         beam_size=1, 
@@ -76,7 +77,7 @@ def process_audio_to_subtitles(audio_path):
     
     srt_content = ""
     dual_text_list = []
-    translator = GoogleTranslator(source='en', target='ar')
+    translator = GoogleTranslator(source='auto', target='ar')
     
     for i, segment in enumerate(segments, start=1):
         start_str = seconds_to_srt_time(segment.start)
@@ -127,8 +128,6 @@ async def download_video_safely(input_data, out_filename):
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
-    # حماية استجابة الزر من انتهاء الصلاحية
     try:
         await query.answer()
     except Exception:
@@ -138,16 +137,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     input_type = context.user_data.get('input_type')
     input_data = context.user_data.get('input_data')
 
+    # تعطيل الأزرار فوراً لمنع التكرار
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
     if data == "cancel":
         try:
-            await query.edit_message_text("❌ تم إلغاء العملية.")
+            await query.edit_message_text("تم إلغاء العملية.")
         except Exception:
             pass
         return
 
     if not input_data:
         try:
-            await query.edit_message_text("⚠️ انتهت صلاحية الطلب، يرجى إرسال الرابط أو الفيديو من جديد.")
+            await query.edit_message_text("انتهت صلاحية الطلب، يرجى إعادة إرسال الملف.")
         except Exception:
             pass
         return
@@ -159,12 +164,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if data == "opt_embed_sub":
-            await query.message.reply_text("⏳ جاري معالجة الفيديو ودمج الترجمة العربية بسرعة فائقة...")
+            status_msg = await query.message.reply_text("جاري معالجة الفيديو ودمج الترجمة...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
                 if not success:
-                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط.")
+                    await status_msg.edit_text("تعذر تحميل المقطع من الرابط المُرسل.")
                     return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
@@ -175,29 +180,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             srt_content, _ = process_audio_to_subtitles(audio_file)
             
             if not srt_content.strip():
-                await query.message.reply_text("⚠️ لم يتم رصد كلمات واضحة في المقطع.")
+                await status_msg.edit_text("لم يتم رصد نصوص واضحة في المقطع.")
                 return
 
             with open(srt_file, "w", encoding="utf-8") as f:
                 f.write(srt_content)
 
+            # حجم خط مناسب ومتناسق غير مغطٍ للشاشة
             cmd = [
                 "ffmpeg", "-y", "-i", in_vid,
-                "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
+                "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
                 "-c:a", "aac", out_vid
             ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية بنجاح ✅🎬")
+            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية بنجاح.")
+            await status_msg.delete()
 
         elif data == "opt_text_only":
-            await query.message.reply_text("⏳ جاري استخراج وترجمة النص الأصلي والمترجم بسرعة...")
+            status_msg = await query.message.reply_text("جاري استخراج وترجمة النصوص...")
             
             if input_type == 'url':
                 success = await download_video_safely(input_data, in_vid)
                 if not success:
-                    await query.message.reply_text("⚠️ لم نتمكن من تحميل المقطع من الرابط.")
+                    await status_msg.edit_text("تعذر تحميل المقطع من الرابط المُرسل.")
                     return
             elif input_type == 'file':
                 file = await context.bot.get_file(input_data)
@@ -208,15 +215,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _, dual_text = process_audio_to_subtitles(audio_file)
 
             if dual_text.strip():
-                await query.message.reply_text(f"📝 **النصوص المستخرجة (الإنجليزي + الترجمة العربية):**\n\n{dual_text[:4000]}")
+                await query.message.reply_text(f"النصوص المستخرجة:\n\n{dual_text[:4000]}")
+                await status_msg.delete()
             else:
-                await query.message.reply_text("⚠️ لم يتم العثور على نصوص واضحة في الصوت.")
+                await status_msg.edit_text("لم يتم العثور على نصوص واضحة في الصوت.")
 
     except Exception as e:
         error_details = traceback.format_exc()
         print(error_details)
         try:
-            await query.message.reply_text(f"⚠️ **خطأ تقني تفصيلي:**\n`{str(e)}`\n\n`{error_details[:3000]}`", parse_mode="Markdown")
+            await query.message.reply_text(f"حدث خطأ تقني:\n`{str(e)}`", parse_mode="Markdown")
         except Exception:
             pass
     finally:
@@ -225,7 +233,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(f)
 
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
+telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND & ~filters.User(is_bot=True), handle_media_or_link))
 telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
