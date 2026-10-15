@@ -66,6 +66,19 @@ def seconds_to_srt_time(seconds):
     milliseconds = int(int((seconds - int(seconds)) * 1000))
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
+def translate_to_arabic(text):
+    if not text.strip():
+        return text
+    try:
+        # محاولة الترجمة عبر GoogleTranslator مع تحديد المصدر والهدف بدقة
+        translator = GoogleTranslator(source='en', target='ar')
+        translated = translator.translate(text)
+        if translated and translated.strip():
+            return translated.strip()
+    except Exception as e:
+        print(f"Translation error: {e}")
+    return text
+
 def process_audio_to_subtitles(audio_path):
     segments, _ = whisper_model.transcribe(
         audio_path, 
@@ -77,7 +90,6 @@ def process_audio_to_subtitles(audio_path):
     
     srt_content = ""
     dual_text_list = []
-    translator = GoogleTranslator(source='auto', target='ar')
     
     for i, segment in enumerate(segments, start=1):
         start_str = seconds_to_srt_time(segment.start)
@@ -87,13 +99,7 @@ def process_audio_to_subtitles(audio_path):
         if not english_text:
             continue
             
-        arabic_text = english_text
-        try:
-            translated = translator.translate(english_text)
-            if translated:
-                arabic_text = translated
-        except Exception:
-            pass
+        arabic_text = translate_to_arabic(english_text)
             
         srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
         dual_text_list.append(f"en: {english_text}\nar: {arabic_text}\n")
