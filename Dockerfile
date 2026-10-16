@@ -7,7 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 # ffmpeg + Arabic-capable fonts (Noto Sans Arabic is used for the burned subtitles)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-noto-core \
+    && apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-noto-core fonts-hosny-amiri \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
