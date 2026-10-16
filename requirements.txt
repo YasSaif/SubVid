@@ -1,7 +1,4 @@
-Flask
-python-telegram-bot
+python-telegram-bot[webhooks]==21.6
+faster-whisper==1.0.3
+deep-translator==1.11.4
 yt-dlp
-faster-whisper
-deep-translator
-requests
-av<19

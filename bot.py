@@ -1,263 +1,433 @@
-import os
-import subprocess
+"""SubVid Ai - Telegram bot: burn Arabic subtitles into a video or extract them as text.
+
+Pipeline: download -> extract audio (ffmpeg) -> transcribe (faster-whisper)
+          -> translate to Arabic (Google via deep-translator) -> burn / send text.
+"""
 import asyncio
-import traceback
+import json
+import logging
+import os
+import re
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import yt_dlp
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from deep_translator import GoogleTranslator
 from faster_whisper import WhisperModel
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, TelegramError
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-TOKEN = os.environ.get("TOKEN")
+# ----------------------------------------------------------------- config
+TOKEN = os.environ["TOKEN"]
 PORT = int(os.environ.get("PORT", "10000"))
-WEBHOOK_URL = os.environ.get("WEBHOOKURL", "").rstrip("/")
+WEBHOOK_URL = (
+    os.environ.get("WEBHOOK_URL")
+    or os.environ.get("WEBHOOKURL")
+    or os.environ.get("RENDER_EXTERNAL_URL")  # set automatically by Render
+    or ""
+).rstrip("/")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
+MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))
+COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
+TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
 
-app_flask = Flask(__name__)
-telegram_app = ApplicationBuilder().token(TOKEN).build()
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("subvid")
 
-# تحميل نموذج Whisper المصغر بأقصى كفاءة وسرعة
-whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
+URL_RE = re.compile(r"https?://\S+")
+JOB_SEM = asyncio.Semaphore(1)  # one heavy job at a time (protects RAM/CPU)
+JOBS: "OrderedDict[str, tuple[str, str]]" = OrderedDict()  # key -> (kind, data)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "مرحباً بك في خدمة SubVid Ai.\n\n"
-        "• يرجى إرسال رابط مقطع مرئي أو ملف فيديو مباشر للبدء."
-    )
 
-async def handle_media_or_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.from_user or message.from_user.is_bot:
-        return
-        
-    url = None
-    if message.text and message.text.strip().startswith(("http://", "https://")):
-        url = message.text.strip()
-    
-    video_file = message.video or message.document
-    
-    if not url and not video_file:
-        await message.reply_text("الرجاء إرسال رابط صالح أو ملف فيديو.")
-        return
+class UserError(Exception):
+    """An error whose message is safe to show to the user."""
 
-    if url:
-        context.user_data['input_type'] = 'url'
-        context.user_data['input_data'] = url
-    elif video_file:
-        context.user_data['input_type'] = 'file'
-        context.user_data['input_data'] = video_file.file_id
 
-    keyboard = [
-        [InlineKeyboardButton("دمج الترجمة العربية بالفيديو", callback_data="opt_embed_sub")],
-        [InlineKeyboardButton("استخراج الترجمة النصية (المترجمة بالعربية)", callback_data="opt_text_only")],
-        [InlineKeyboardButton("إلغاء", callback_data="cancel")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+# ---------------------------------------------------------------- whisper
+_model = None
+_model_lock = threading.Lock()
 
-    await message.reply_text(
-        "تم استلام الملف بنجاح. يرجى اختيار الإجراء المطلوب:",
-        reply_markup=reply_markup
-    )
 
-def seconds_to_srt_time(seconds):
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    milliseconds = int(int((seconds - int(seconds)) * 1000))
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+def get_model() -> WhisperModel:
+    global _model
+    with _model_lock:
+        if _model is None:
+            log.info("Loading Whisper model: %s", WHISPER_MODEL)
+            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        return _model
 
-def process_audio_to_arabic_subtitles(audio_path):
-    # استخدام ترجمة Whisper الداخلية مباشرة للغة العربية
-    segments, _ = whisper_model.transcribe(
-        audio_path, 
-        beam_size=1, 
-        vad_filter=True, 
+
+def transcribe(audio_path: str):
+    segments, info = get_model().transcribe(
+        audio_path,
+        beam_size=1,
+        vad_filter=True,
         condition_on_previous_text=False,
-        task="translate"
     )
-    
-    srt_content = ""
-    text_list = []
-    
-    for i, segment in enumerate(segments, start=1):
-        start_str = seconds_to_srt_time(segment.start)
-        end_str = seconds_to_srt_time(segment.end)
-        arabic_text = segment.text.strip()
-        
-        if not arabic_text:
-            continue
-            
-        srt_content += f"{i}\n{start_str} --> {end_str}\n{arabic_text}\n\n"
-        text_list.append(arabic_text)
-        
-    return srt_content, "\n".join(text_list)
+    out = [(s.start, s.end, s.text.strip()) for s in segments if s.text.strip()]
+    return out, info.language
 
-async def download_video_safely(input_data, out_filename):
-    base_name = out_filename.replace('.mp4', '')
-    ydl_opts = {
-        'outtmpl': base_name,
-        'format': 'best[ext=mp4]/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {'tiktok': {'web_api': 'v2'}},
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+
+# -------------------------------------------------------------- translate
+def _translate_one(text: str):
+    for _ in range(3):
+        try:
+            res = GoogleTranslator(source="auto", target="ar").translate(text)
+            if res:
+                return res, True
+        except Exception as e:  # network / rate limit
+            log.warning("translate retry: %s", e)
+            time.sleep(1)
+    return text, False
+
+
+def translate_segments(segments):
+    texts = [t for _, _, t in segments]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(_translate_one, texts))
+    if not any(ok for _, ok in results):
+        raise UserError("تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.")
+    return [(s, e, r[0]) for (s, e, _), r in zip(segments, results)]
+
+
+# -------------------------------------------------------------------- srt
+def srt_time(seconds: float) -> str:
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3_600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def build_srt(segments) -> str:
+    blocks = []
+    for i, (start, end, text) in enumerate(segments, start=1):
+        blocks.append(f"{i}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
+    return "\n".join(blocks)
+
+
+# ----------------------------------------------------------------- ffmpeg
+async def run_cmd(args, cwd=None, timeout=900) -> bytes:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise UserError("استغرقت المعالجة وقتاً أطول من المسموح، جرّب مقطعاً أقصر.")
+    if proc.returncode != 0:
+        tail = err.decode(errors="ignore")[-1000:]
+        raise RuntimeError(f"{args[0]} exited {proc.returncode}: {tail}")
+    return out
+
+
+async def probe(video: Path):
+    """Return (width, height, duration_seconds) with rotation taken into account."""
+    raw = await run_cmd(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries",
+            "stream=width,height:stream_tags=rotate:stream_side_data=rotation:format=duration",
+            "-of", "json", str(video),
+        ],
+        timeout=60,
+    )
+    info = json.loads(raw or b"{}")
+    stream = (info.get("streams") or [{}])[0]
+    w, h = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    rot = (stream.get("tags") or {}).get("rotate")
+    for sd in stream.get("side_data_list") or []:
+        if "rotation" in sd:
+            rot = sd["rotation"]
+    if rot is not None and abs(int(float(rot))) % 180 == 90:
+        w, h = h, w
+    duration = float((info.get("format") or {}).get("duration") or 0)
+    return w, h, duration
+
+
+async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int) -> Path:
+    scale = ""
+    short_side = min(w, h)
+    if short_side > 720:  # keep the file small and the encode fast
+        f = 720 / short_side
+        w, h = int(w * f) // 2 * 2, int(h * f) // 2 * 2
+        scale = f"scale={w}:{h},"
+    portrait = h > w
+    font_size = 9 if portrait else 14   # relative to a 288px-high canvas
+    margin_v = 35 if portrait else 15   # keep text above app UI / bottom edge
+    style = (
+        "FontName=Noto Sans Arabic,Bold=1,"
+        f"FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=2,"
+        f"MarginV={margin_v},MarginL=20,MarginR=20"
+    )
+    out = workdir / "output.mp4"
+    # srt is referenced by relative name and ffmpeg runs inside workdir -> no path escaping issues
+    vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
+    await run_cmd(
+        [
+            "ffmpeg", "-y", "-i", str(video), "-vf", vf,
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "28", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out),
+        ],
+        cwd=str(workdir),
+        timeout=1500,
+    )
+    return out
+
+
+# --------------------------------------------------------------- download
+def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
+    opts = {
+        "outtmpl": str(workdir / "input.%(ext)s"),
+        # text-only mode needs just the audio -> much smaller/faster download
+        "format": "ba/b" if audio_only else "bv*[height<=720]+ba/b[height<=720]/b",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "max_filesize": 300 * 1024 * 1024,
     }
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([input_data])
-        
-        for ext in ['.mp4', '.mkv', '.webm', '.mov']:
-            if os.path.exists(base_name + ext):
-                if base_name + ext != out_filename:
-                    os.rename(base_name + ext, out_filename)
-                break
-        return os.path.exists(out_filename)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
     except Exception as e:
-        print(f"Download error: {e}")
-        return False
+        log.warning("yt-dlp failed for %s: %s", url, e)
+        raise UserError("تعذر تحميل الفيديو من هذا الرابط (قد يكون خاصاً أو محظوراً من السيرفر).")
+    files = [p for p in workdir.glob("input.*") if p.suffix not in (".part", ".ytdl")]
+    if not files:
+        raise UserError("لم يتم العثور على فيديو في هذا الرابط.")
+    return files[0]
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+
+async def fetch_input(bot, kind: str, data: str, workdir: Path, audio_only: bool = False) -> Path:
+    if kind == "url":
+        return await asyncio.to_thread(_ytdlp_download, data, workdir, audio_only)
+    dest = workdir / "input.mp4"
     try:
-        await query.answer()
-    except Exception:
+        tg_file = await bot.get_file(data)
+        await tg_file.download_to_drive(dest)
+    except BadRequest as e:
+        if "too big" in str(e).lower():
+            raise UserError(
+                "تيليجرام يمنع البوت من تنزيل ملفات أكبر من 20MB. "
+                "ارفع الفيديو على أي موقع وأرسل لي الرابط بدلاً من الملف."
+            )
+        raise
+    return dest
+
+
+# --------------------------------------------------------------- pipeline
+async def set_status(msg, text: str):
+    try:
+        await msg.edit_text(text)
+    except TelegramError:
         pass
-    
-    data = query.data
-    input_type = context.user_data.get('input_type')
-    input_data = context.user_data.get('input_data')
 
-    # تعطيل الأزرار فوراً لمنع التكرار
+
+async def process(bot, chat_id: int, mode: str, kind: str, data: str, status):
+    workdir = Path(tempfile.mkdtemp(prefix="subvid_"))
     try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+        async with JOB_SEM:
+            await set_status(status, "⬇️ جاري تحميل الفيديو...")
+            video = await fetch_input(bot, kind, data, workdir, audio_only=(mode == "txt"))
 
-    if data == "cancel":
-        try:
-            await query.edit_message_text("تم إلغاء العملية.")
-        except Exception:
-            pass
-        return
+            w, h, duration = await probe(video)
+            if duration and duration > MAX_MINUTES * 60:
+                raise UserError(f"الحد الأقصى لمدة المقطع {MAX_MINUTES} دقائق.")
 
-    if not input_data:
-        try:
-            await query.edit_message_text("انتهت صلاحية الطلب، يرجى إعادة إرسال الملف.")
-        except Exception:
-            pass
-        return
+            await set_status(status, "🎧 جاري استخراج الصوت...")
+            audio = workdir / "audio.wav"
+            await run_cmd(
+                ["ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(audio)]
+            )
 
-    in_vid = f"in_{query.id}.mp4"
-    audio_file = f"audio_{query.id}.mp3"
-    srt_file = f"sub_{query.id}.srt"
-    out_vid = f"out_{query.id}.mp4"
+            await set_status(status, "📝 جاري تفريغ الكلام...")
+            segments, lang = await asyncio.to_thread(transcribe, str(audio))
+            if not segments:
+                raise UserError("ما قدرت أرصد كلاماً واضحاً في المقطع.")
 
-    try:
-        if data == "opt_embed_sub":
-            status_msg = await query.message.reply_text("جاري معالجة الفيديو ودمج الترجمة العربية...")
-            
-            if input_type == 'url':
-                success = await download_video_safely(input_data, in_vid)
-                if not success:
-                    await status_msg.edit_text("تعذر تحميل المقطع من الرابط المُرسل.")
-                    return
-            elif input_type == 'file':
-                file = await context.bot.get_file(input_data)
-                await file.download_to_drive(in_vid)
+            if lang != "ar":
+                await set_status(status, "🌐 جاري الترجمة إلى العربية...")
+                segments = await asyncio.to_thread(translate_segments, segments)
 
-            subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            srt_text = build_srt(segments)
+            (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
+            plain = "\n".join(t for _, _, t in segments)
 
-            srt_content, _ = process_audio_to_arabic_subtitles(audio_file)
-            
-            if not srt_content.strip():
-                await status_msg.edit_text("لم يتم رصد نصوص واضحة في المقطع.")
-                return
-
-            with open(srt_file, "w", encoding="utf-8") as f:
-                f.write(srt_content)
-
-            cmd = [
-                "ffmpeg", "-y", "-i", in_vid,
-                "-vf", f"subtitles={srt_file}:force_style='Fontname=Arial,FontSize=16,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3'",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-c:a", "aac", out_vid
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            await query.message.reply_video(video=open(out_vid, "rb"), caption="إليك الفيديو بعد دمج الترجمة العربية بنجاح.")
-            await status_msg.delete()
-
-        elif data == "opt_text_only":
-            status_msg = await query.message.reply_text("جاري استخراج الترجمة العربية...")
-            
-            if input_type == 'url':
-                success = await download_video_safely(input_data, in_vid)
-                if not success:
-                    await status_msg.edit_text("تعذر تحميل المقطع من الرابط المُرسل.")
-                    return
-            elif input_type == 'file':
-                file = await context.bot.get_file(input_data)
-                await file.download_to_drive(in_vid)
-
-            subprocess.run(["ffmpeg", "-y", "-i", in_vid, "-vn", "-acodec", "libmp3lame", audio_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            _, arabic_text = process_audio_to_arabic_subtitles(audio_file)
-
-            if arabic_text.strip():
-                await query.message.reply_text(f"النصوص المترجمة للعربية:\n\n{arabic_text[:4000]}")
-                await status_msg.delete()
+            if mode == "txt":
+                if len(plain) <= 3500:
+                    await bot.send_message(chat_id, f"📄 الترجمة العربية:\n\n{plain}")
+                else:
+                    (workdir / "translation.txt").write_text(plain, encoding="utf-8")
+                    with open(workdir / "translation.txt", "rb") as f:
+                        await bot.send_document(chat_id, f, caption="📄 الترجمة العربية")
+                with open(workdir / "subs.srt", "rb") as f:
+                    await bot.send_document(chat_id, f, filename="subtitles_ar.srt",
+                                            caption="ملف الترجمة المزمّنة (SRT)")
             else:
-                await status_msg.edit_text("لم يتم العثور على نصوص واضحة في الصوت.")
-
-    except Exception as e:
-        error_details = traceback.format_exc()
-        print(error_details)
+                await set_status(status, "🎬 جاري دمج الترجمة بالفيديو...")
+                out = await burn_subtitles(video, "subs.srt", workdir, w, h)
+                if out.stat().st_size > TG_UPLOAD_LIMIT:
+                    with open(workdir / "subs.srt", "rb") as f:
+                        await bot.send_document(
+                            chat_id, f, filename="subtitles_ar.srt",
+                            caption="⚠️ الفيديو الناتج أكبر من 50MB (حد تيليجرام للبوتات)، "
+                                    "هذا ملف الترجمة بدلاً منه.",
+                        )
+                else:
+                    await set_status(status, "📤 جاري رفع الفيديو...")
+                    with open(out, "rb") as f:
+                        await bot.send_video(chat_id, f, supports_streaming=True,
+                                             caption="✅ تم دمج الترجمة العربية.")
         try:
-            await query.message.reply_text(f"حدث خطأ تقني:\n`{str(e)}`", parse_mode="Markdown")
-        except Exception:
+            await status.delete()
+        except TelegramError:
             pass
+    except UserError as e:
+        await set_status(status, f"⚠️ {e}")
+    except Exception:
+        log.exception("job failed")
+        await set_status(status, "❌ حصل خطأ غير متوقع أثناء المعالجة. حاول مرة ثانية.")
     finally:
-        for f in [in_vid, audio_file, srt_file, out_vid]:
-            if os.path.exists(f):
-                os.remove(f)
+        shutil.rmtree(workdir, ignore_errors=True)
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler((filters.TEXT | filters.VIDEO | filters.Document.VIDEO) & ~filters.COMMAND, handle_media_or_link))
-telegram_app.add_handler(CallbackQueryHandler(button_callback))
 
-@app_flask.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
+# ---------------------------------------------------------------- handlers
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "مرحباً بك في SubVid Ai 🎬\n\n"
+        "أرسل لي رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو، "
+        "وأختار لك بين دمج الترجمة العربية بالفيديو أو استخراجها كنص."
+    )
+
+
+async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    kind = data = None
+    if msg.video:
+        kind, data = "file", msg.video.file_id
+    elif msg.document and (msg.document.mime_type or "").startswith("video/"):
+        kind, data = "file", msg.document.file_id
+    elif msg.text:
+        m = URL_RE.search(msg.text)
+        if m:
+            kind, data = "url", m.group(0)
+    if not kind:
+        await msg.reply_text("أرسل رابط فيديو أو ملف فيديو.")
+        return
+
+    key = uuid.uuid4().hex[:10]
+    JOBS[key] = (kind, data)
+    while len(JOBS) > 300:
+        JOBS.popitem(last=False)
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎬 دمج الترجمة العربية بالفيديو", callback_data=f"sub|{key}")],
+            [InlineKeyboardButton("📄 استخراج الترجمة النصية", callback_data=f"txt|{key}")],
+            [InlineKeyboardButton("إلغاء", callback_data=f"x|{key}")],
+        ]
+    )
+    await msg.reply_text("وصلني ✅ اختر المطلوب:", reply_markup=keyboard)
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
     try:
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, telegram_app.bot)
-        
-        async def process():
-            async with telegram_app:
-                if not telegram_app.running:
-                    await telegram_app.initialize()
-                await telegram_app.process_update(update)
-                
-        asyncio.run(process())
-    except Exception as e:
-        print(f"Webhook Error: {traceback.format_exc()}")
-    return "OK"
+        await q.answer()
+    except TelegramError:
+        pass
+    action, _, key = (q.data or "").partition("|")
 
-@app_flask.route("/", methods=["GET"])
-def index():
-    return "Bot is active and running 24/7!"
+    if action == "x":
+        JOBS.pop(key, None)
+        await q.edit_message_text("تم الإلغاء.")
+        return
+
+    job = JOBS.pop(key, None)  # pop => a double tap can't start the job twice
+    if not job:
+        await q.edit_message_text("انتهت صلاحية الطلب، أعد إرسال الفيديو.")
+        return
+
+    status = await q.edit_message_text("⏳ في قائمة الانتظار...")
+    context.application.create_task(
+        process(context.bot, q.message.chat_id, action, job[0], job[1], status)
+    )
+
+
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    log.error("handler error", exc_info=context.error)
+
+
+async def post_init(app: Application):
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            log.critical("%s not found in PATH - deploy with the Dockerfile!", tool)
+    await asyncio.to_thread(get_model)  # warm up so the first request is fast
+
+
+# -------------------------------------------------------------------- main
+def main():
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .concurrent_updates(True)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(300)  # video upload
+        .build()
+    )
+    app.add_handler(CommandHandler(["start", "help"], cmd_start))
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & ((filters.TEXT & ~filters.COMMAND) | filters.VIDEO | filters.Document.VIDEO),
+            on_input,
+        )
+    )
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(sub|txt|x)\|"))
+    app.add_error_handler(on_error)
+
+    if WEBHOOK_URL:
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:  # local testing
+        app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
-    if WEBHOOK_URL:
-        webhook_link = f"{WEBHOOK_URL}/{TOKEN}"
-        
-        async def setup_webhook():
-            async with telegram_app:
-                await telegram_app.initialize()
-                await telegram_app.bot.delete_webhook(drop_pending_updates=True)
-                await telegram_app.bot.set_webhook(url=webhook_link)
-                print(f"Webhook successfully forced to: {webhook_link}")
-                
-        asyncio.run(setup_webhook())
-        
-    app_flask.run(host="0.0.0.0", port=PORT)
+    main()
