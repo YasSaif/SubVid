@@ -1,7 +1,9 @@
-"""SubVid Ai - Telegram bot: burn Arabic subtitles into a video or extract them as text.
+"""SubVid Ai - Telegram bot: burn subtitles into a video or extract them as text.
 
-Pipeline: download -> extract audio (ffmpeg) -> transcribe (faster-whisper)
-          -> translate to Arabic (Google via deep-translator) -> burn / send text.
+Flow: pick UI language -> send video/link -> source language (auto/manual)
+      -> target language -> output type -> (style settings) -> process.
+Pipeline: download -> audio (ffmpeg) -> transcribe (faster-whisper)
+          -> translate (Google API / gtx / MyMemory) -> clean + wrap -> burn or send text.
 """
 import asyncio
 import json
@@ -41,8 +43,9 @@ WEBHOOK_URL = (
     or ""
 ).rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))
+MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
 TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
 
 logging.basicConfig(
@@ -53,11 +56,168 @@ log = logging.getLogger("subvid")
 
 URL_RE = re.compile(r"https?://\S+")
 JOB_SEM = asyncio.Semaphore(1)  # one heavy job at a time (protects RAM/CPU)
-JOBS: "OrderedDict[str, tuple[str, str]]" = OrderedDict()  # key -> (kind, data)
+JOBS: "OrderedDict[str, dict]" = OrderedDict()  # key -> job settings
+PENDING: list = []  # ids of jobs that are running or waiting (for queue position)
 
 
 class UserError(Exception):
-    """An error whose message is safe to show to the user."""
+    """An error whose (localized) message is safe to show to the user."""
+
+    def __init__(self, key: str, **kw):
+        super().__init__(key)
+        self.key = key
+        self.kw = kw
+
+
+# -------------------------------------------------------------- languages
+LANGS = {
+    "ar": "العربية", "en": "English", "fr": "Français", "es": "Español",
+    "de": "Deutsch", "tr": "Türkçe", "fa": "فارسی", "ur": "اردو",
+    "hi": "हिन्दी", "id": "Bahasa Indonesia", "ru": "Русский", "it": "Italiano",
+    "pt": "Português", "nl": "Nederlands", "pl": "Polski", "uk": "Українська",
+    "he": "עברית", "el": "Ελληνικά", "th": "ไทย", "vi": "Tiếng Việt",
+    "ms": "Bahasa Melayu", "bn": "বাংলা", "sv": "Svenska", "ro": "Română",
+    "cs": "Čeština", "hu": "Magyar", "fi": "Suomi", "sw": "Kiswahili",
+    "ta": "தமிழ்", "zh": "中文", "ja": "日本語", "ko": "한국어",
+}
+CJK = {"zh", "ja", "ko"}  # no CJK font installed -> source only, not burn targets
+TARGETS = [c for c in LANGS if c not in CJK]
+SOURCES = list(LANGS)
+ARABIC_SCRIPT = {"ar", "fa", "ur"}
+PAGE_SIZE = 10
+
+
+def ordered(codes, first):
+    return [first] + [c for c in codes if c != first] if first in codes else list(codes)
+
+
+# ----------------------------------------------------------------- styles
+FONTS_AR = ["Noto Sans Arabic", "Noto Naskh Arabic", "Noto Kufi Arabic", "Amiri"]
+FONTS_LAT = ["Noto Sans", "Noto Serif"]
+SIZES = [("size_s", 0.8), ("size_m", 1.0), ("size_l", 1.3)]
+STYLES = ["classic", "box", "yellow"]
+STYLE_DEFS = {  # ASS colours are &HAABBGGRR (AA=00 opaque, FF transparent)
+    "classic": "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0",
+    "yellow": "PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0",
+    "box": "PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BackColour=&H80000000,BorderStyle=3,Outline=3,Shadow=0",
+}
+POSITIONS = [("pos_bottom", 2), ("pos_middle", 5), ("pos_top", 8)]
+
+
+def fonts_for(tgt: str):
+    return FONTS_AR if tgt in ARABIC_SCRIPT else FONTS_LAT
+
+
+# ---------------------------------------------------------------- strings
+STR = {
+    "ar": {
+        "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
+        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\nلتغيير لغة الواجهة: /language",
+        "send_media": "أرسل رابط فيديو أو ملف فيديو.",
+        "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
+        "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
+        "src_auto": "🔍 اكتشاف تلقائي",
+        "src_manual": "🌐 تحديد اللغة يدوياً",
+        "pick_src": "اختر لغة الكلام في المقطع:",
+        "tgt_q": "اختر لغة الترجمة:",
+        "mode_q": "اختر نوع الإخراج:",
+        "mode_burn": "🎬 دمج الترجمة بالفيديو",
+        "mode_txt": "📄 نص الترجمة + ملف SRT",
+        "settings": "🎨 تخصيص الترجمة\nاضغط على أي زر لتغيير الخيار، ثم اضغط «ابدأ».",
+        "font": "الخط", "size": "الحجم", "style": "النمط", "pos": "المكان",
+        "size_s": "صغير", "size_m": "متوسط", "size_l": "كبير",
+        "style_classic": "كلاسيكي", "style_box": "خلفية", "style_yellow": "أصفر",
+        "pos_bottom": "أسفل", "pos_middle": "وسط", "pos_top": "أعلى",
+        "start": "▶️ ابدأ", "cancel": "إلغاء", "cancelled": "تم الإلغاء.",
+        "expired": "انتهت صلاحية الطلب، أعد إرسال الفيديو.",
+        "queued": "⏳ جاري التجهيز...",
+        "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
+        "p_dl": "⬇️ جاري تحميل الفيديو...",
+        "p_audio": "🎧 جاري استخراج الصوت...",
+        "p_tr_auto": "📝 جاري تفريغ الكلام (مع اكتشاف اللغة)...",
+        "p_tr": "📝 جاري تفريغ الكلام...",
+        "p_trans": "🌐 جاري الترجمة...",
+        "p_burn": "🎬 جاري دمج الترجمة بالفيديو...",
+        "p_up": "📤 جاري رفع الفيديو...",
+        "caption_burn": "✅ تم دمج الترجمة.",
+        "caption_txt": "📄 الترجمة",
+        "caption_srt": "ملف الترجمة المزمّنة (SRT)",
+        "too_big": "⚠️ الفيديو الناتج أكبر من 50MB (حد تيليجرام للبوتات)، هذا ملف الترجمة بدلاً منه.",
+        "no_speech": "ما قدرت أرصد كلاماً واضحاً في المقطع.",
+        "too_long": "الحد الأقصى لمدة المقطع {m} دقائق.",
+        "dl_fail": "تعذر تحميل الفيديو من هذا الرابط (قد يكون خاصاً أو محظوراً من السيرفر).",
+        "dl_empty": "لم يتم العثور على فيديو في هذا الرابط.",
+        "file_big": "تيليجرام يمنع البوت من تنزيل ملفات أكبر من 20MB. ارفع الفيديو على أي موقع وأرسل لي الرابط بدلاً من الملف.",
+        "translate_fail": "تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.",
+        "timeout": "استغرقت المعالجة وقتاً أطول من المسموح، جرّب مقطعاً أقصر.",
+        "generic": "حصل خطأ غير متوقع أثناء المعالجة. حاول مرة ثانية.",
+    },
+    "en": {
+        "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
+        "welcome": "Welcome to SubVid Ai 🎬\n\nSend a video link (YouTube, TikTok, direct link) or a video file.\nChange interface language: /language",
+        "send_media": "Send a video link or a video file.",
+        "src_q": "🔍 How should we find the spoken language in the clip?",
+        "src_note": "ℹ️ Auto-detect may take a little longer; choosing the language manually is usually faster and more accurate.",
+        "src_auto": "🔍 Auto-detect",
+        "src_manual": "🌐 Choose language",
+        "pick_src": "Choose the spoken language:",
+        "tgt_q": "Choose the translation language:",
+        "mode_q": "Choose the output type:",
+        "mode_burn": "🎬 Burn subtitles into video",
+        "mode_txt": "📄 Translated text + SRT file",
+        "settings": "🎨 Subtitle style\nTap a button to change an option, then press Start.",
+        "font": "Font", "size": "Size", "style": "Style", "pos": "Position",
+        "size_s": "Small", "size_m": "Medium", "size_l": "Large",
+        "style_classic": "Classic", "style_box": "Box", "style_yellow": "Yellow",
+        "pos_bottom": "Bottom", "pos_middle": "Middle", "pos_top": "Top",
+        "start": "▶️ Start", "cancel": "Cancel", "cancelled": "Cancelled.",
+        "expired": "This request expired, please send the video again.",
+        "queued": "⏳ Preparing...",
+        "queue": "⏳ Your place in the queue: {n} ahead of you.",
+        "p_dl": "⬇️ Downloading the video...",
+        "p_audio": "🎧 Extracting audio...",
+        "p_tr_auto": "📝 Transcribing (detecting language)...",
+        "p_tr": "📝 Transcribing...",
+        "p_trans": "🌐 Translating...",
+        "p_burn": "🎬 Burning subtitles into the video...",
+        "p_up": "📤 Uploading the video...",
+        "caption_burn": "✅ Subtitles added.",
+        "caption_txt": "📄 Translation",
+        "caption_srt": "Timed subtitles file (SRT)",
+        "too_big": "⚠️ The resulting video is over 50MB (Telegram's bot limit), here is the subtitle file instead.",
+        "no_speech": "I couldn't detect clear speech in the clip.",
+        "too_long": "Maximum clip length is {m} minutes.",
+        "dl_fail": "Couldn't download the video from this link (it may be private or blocked from the server).",
+        "dl_empty": "No video found at this link.",
+        "file_big": "Telegram doesn't let bots download files over 20MB. Upload the video somewhere and send me the link instead.",
+        "translate_fail": "Translation is unavailable right now. Please try again shortly.",
+        "timeout": "Processing took longer than allowed, try a shorter clip.",
+        "generic": "An unexpected error occurred while processing. Please try again.",
+    },
+}
+
+
+def T(ui: str, key: str, **kw) -> str:
+    s = STR.get(ui, STR["en"]).get(key) or STR["en"][key]
+    return s.format(**kw) if kw else s
+
+
+# ----------------------------------------------------------------- timing
+class Stages:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.t = self.t0 = time.monotonic()
+        self.items = []
+
+    def mark(self, name: str):
+        now = time.monotonic()
+        self.items.append(f"{name}={now - self.t:.1f}s")
+        self.t = now
+
+    def summary(self) -> str:
+        return " ".join(self.items) + f" total={time.monotonic() - self.t0:.1f}s"
 
 
 # ---------------------------------------------------------------- whisper
@@ -74,38 +234,39 @@ def get_model() -> WhisperModel:
         return _model
 
 
-def transcribe(audio_path: str):
+def transcribe(audio_path: str, language=None):
+    """language=None -> auto-detect; otherwise skip detection (faster)."""
     segments, info = get_model().transcribe(
         audio_path,
         beam_size=1,
         vad_filter=True,
         condition_on_previous_text=False,
+        language=language,
     )
     out = [(s.start, s.end, s.text.strip()) for s in segments if s.text.strip()]
     return out, info.language
 
 
 # -------------------------------------------------------------- translate
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional: official Google Cloud Translation key
 MAX_CHUNK = 450  # chars per request (MyMemory limit is ~500 bytes)
 _cooldown: dict = {}  # provider name -> unix time until which it is skipped
 
 
-def _tr_official(text: str, src: str) -> str:
+def _tr_official(text: str, src: str, tgt: str) -> str:
     r = httpx.post(
         "https://translation.googleapis.com/language/translate/v2",
         params={"key": GOOGLE_API_KEY},
-        data={"q": text, "target": "ar", "format": "text"},
+        data={"q": text, "target": tgt, "format": "text"},
         timeout=20,
     )
     r.raise_for_status()
     return r.json()["data"]["translations"][0]["translatedText"]
 
 
-def _tr_gtx(text: str, src: str) -> str:
+def _tr_gtx(text: str, src: str, tgt: str) -> str:
     r = httpx.post(
         "https://translate.googleapis.com/translate_a/single",
-        params={"client": "gtx", "sl": "auto", "tl": "ar", "dt": "t"},
+        params={"client": "gtx", "sl": "auto", "tl": tgt, "dt": "t"},
         data={"q": text},
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=20,
@@ -114,10 +275,10 @@ def _tr_gtx(text: str, src: str) -> str:
     return "".join(part[0] for part in r.json()[0] if part and part[0])
 
 
-def _tr_mymemory(text: str, src: str) -> str:
+def _tr_mymemory(text: str, src: str, tgt: str) -> str:
     r = httpx.get(
         "https://api.mymemory.translated.net/get",
-        params={"q": text, "langpair": f"{src}|ar"},
+        params={"q": text, "langpair": f"{src}|{tgt}"},
         timeout=20,
     )
     r.raise_for_status()
@@ -128,7 +289,7 @@ def _tr_mymemory(text: str, src: str) -> str:
     return out
 
 
-def _translate_text(text: str, src: str) -> str:
+def _translate_text(text: str, src: str, tgt: str) -> str:
     """Try providers in order; a provider that keeps failing is skipped for 10 minutes."""
     providers = []
     if GOOGLE_API_KEY:
@@ -139,7 +300,7 @@ def _translate_text(text: str, src: str) -> str:
             continue
         for attempt in range(2):
             try:
-                res = fn(text, src)
+                res = fn(text, src, tgt)
                 if res and res.strip():
                     return res
             except Exception as e:
@@ -149,8 +310,8 @@ def _translate_text(text: str, src: str) -> str:
     raise RuntimeError("all translation providers failed")
 
 
-def translate_segments(segments, src: str = "auto"):
-    """Translate to Arabic in a few small batches (one segment per line)."""
+def translate_segments(segments, src: str, tgt: str):
+    """Translate in a few small batches (one segment per line)."""
     texts = [" ".join(t.split()) for _, _, t in segments]
 
     chunks, cur, size = [], [], 0
@@ -168,7 +329,7 @@ def translate_segments(segments, src: str = "auto"):
     for idxs in chunks:
         joined = "\n".join(texts[i] for i in idxs)
         try:
-            out = _translate_text(joined, src).split("\n")
+            out = _translate_text(joined, src, tgt).split("\n")
         except Exception:
             log.warning("chunk translation failed; keeping original text for it")
             continue
@@ -181,15 +342,74 @@ def translate_segments(segments, src: str = "auto"):
         log.warning("line count mismatch (%d vs %d); translating one by one", len(out), len(idxs))
         for i in idxs:
             try:
-                result[i] = _translate_text(texts[i], src)
+                result[i] = _translate_text(texts[i], src, tgt)
                 ok += 1
             except Exception:
                 pass
             time.sleep(0.4)
 
     if ok == 0:
-        raise UserError("تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.")
+        raise UserError("translate_fail")
     return [(s, e, r) for (s, e, _), r in zip(segments, result)]
+
+
+# --------------------------------------------------- text clean / wrapping
+# invisible direction/format characters that show up as empty boxes in burned subtitles
+_STRIP = (
+    list(range(0x200B, 0x2010))      # ZWSP, ZWNJ, ZWJ, LRM, RLM
+    + list(range(0x202A, 0x202F))    # embeddings / overrides
+    + list(range(0x2060, 0x2070))    # word joiner, isolates, invisible operators
+    + [0xFEFF, 0x00AD, 0x061C]       # BOM, soft hyphen, Arabic letter mark
+)
+_STRIP_MAP = dict.fromkeys(_STRIP, None)
+_KEEP_JOINERS = {0x200C, 0x200D}  # meaningful in Persian/Urdu spelling
+
+
+def clean_text(text: str, keep_joiners: bool = False) -> str:
+    table = {k: None for k in _STRIP if not (keep_joiners and k in _KEEP_JOINERS)}
+    return " ".join(text.translate(table).split())
+
+
+def wrap2(line: str, max_chars: int) -> str:
+    """Wrap into at most two balanced lines."""
+    if len(line) <= max_chars:
+        return line
+    words = line.split()
+    best, best_diff = None, None
+    for i in range(1, len(words)):
+        a, b = " ".join(words[:i]), " ".join(words[i:])
+        diff = abs(len(a) - len(b))
+        if best_diff is None or diff < best_diff:
+            best, best_diff = (a, b), diff
+    return f"{best[0]}\n{best[1]}" if best else line
+
+
+def make_cues(segments, max_chars: int):
+    """Split long segments into several timed cues of at most two short lines."""
+    cues = []
+    for start, end, text in segments:
+        words = text.split()
+        if not words:
+            continue
+        chunks, cur, n = [], [], 0
+        for w in words:
+            add = len(w) + (1 if cur else 0)
+            if cur and n + add > 2 * max_chars:
+                chunks.append(cur)
+                cur, n = [w], len(w)
+            else:
+                cur.append(w)
+                n += add
+        if cur:
+            chunks.append(cur)
+        total = sum(len(" ".join(c)) for c in chunks) or 1
+        t, dur = start, end - start
+        for c in chunks:
+            line = " ".join(c)
+            d = dur * len(line) / total
+            cues.append((t, t + d, wrap2(line, max_chars)))
+            t += d
+    return cues
 
 
 # -------------------------------------------------------------------- srt
@@ -201,9 +421,9 @@ def srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def build_srt(segments) -> str:
+def build_srt(cues) -> str:
     blocks = []
-    for i, (start, end, text) in enumerate(segments, start=1):
+    for i, (start, end, text) in enumerate(cues, start=1):
         blocks.append(f"{i}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
     return "\n".join(blocks)
 
@@ -220,7 +440,7 @@ async def run_cmd(args, cwd=None, timeout=900) -> bytes:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        raise UserError("استغرقت المعالجة وقتاً أطول من المسموح، جرّب مقطعاً أقصر.")
+        raise UserError("timeout")
     if proc.returncode != 0:
         tail = err.decode(errors="ignore")[-1000:]
         raise RuntimeError(f"{args[0]} exited {proc.returncode}: {tail}")
@@ -251,7 +471,7 @@ async def probe(video: Path):
     return w, h, duration
 
 
-async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int) -> Path:
+async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict) -> Path:
     scale = ""
     short_side = min(w, h)
     if short_side > 720:  # keep the file small and the encode fast
@@ -259,13 +479,24 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
         w, h = int(w * f) // 2 * 2, int(h * f) // 2 * 2
         scale = f"scale={w}:{h},"
     portrait = h > w
-    font_size = 9 if portrait else 14   # relative to a 288px-high canvas
-    margin_v = 35 if portrait else 15   # keep text above app UI / bottom edge
+
+    fonts = fonts_for(job["tgt"])
+    font = fonts[job["font_i"] % len(fonts)]
+    mult = SIZES[job["size_i"]][1]
+    base = 9 if portrait else 14  # relative to a 288px-high canvas
+    font_size = max(6, round(base * mult))
+    style_key = STYLES[job["style_i"]]
+    align = POSITIONS[job["pos_i"]][1]
+    if align == 2:
+        margin_v = 35 if portrait else 15
+    elif align == 8:
+        margin_v = 30 if portrait else 12
+    else:
+        margin_v = 0
+
     style = (
-        "FontName=Noto Sans Arabic,Bold=1,"
-        f"FontSize={font_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-        f"BorderStyle=1,Outline=2,Shadow=0,Alignment=2,"
-        f"MarginV={margin_v},MarginL=20,MarginR=20"
+        f"FontName={font},Bold=1,FontSize={font_size},{STYLE_DEFS[style_key]},"
+        f"Alignment={align},MarginV={margin_v},MarginL=20,MarginR=20"
     )
     out = workdir / "output.mp4"
     # srt is referenced by relative name and ffmpeg runs inside workdir -> no path escaping issues
@@ -291,6 +522,7 @@ def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
+        "noprogress": True,
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 3,
@@ -303,10 +535,10 @@ def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
             ydl.download([url])
     except Exception as e:
         log.warning("yt-dlp failed for %s: %s", url, e)
-        raise UserError("تعذر تحميل الفيديو من هذا الرابط (قد يكون خاصاً أو محظوراً من السيرفر).")
+        raise UserError("dl_fail")
     files = [p for p in workdir.glob("input.*") if p.suffix not in (".part", ".ytdl")]
     if not files:
-        raise UserError("لم يتم العثور على فيديو في هذا الرابط.")
+        raise UserError("dl_empty")
     return files[0]
 
 
@@ -319,10 +551,7 @@ async def fetch_input(bot, kind: str, data: str, workdir: Path, audio_only: bool
         await tg_file.download_to_drive(dest)
     except BadRequest as e:
         if "too big" in str(e).lower():
-            raise UserError(
-                "تيليجرام يمنع البوت من تنزيل ملفات أكبر من 20MB. "
-                "ارفع الفيديو على أي موقع وأرسل لي الرابط بدلاً من الملف."
-            )
+            raise UserError("file_big")
         raise
     return dest
 
@@ -335,81 +564,210 @@ async def set_status(msg, text: str):
         pass
 
 
-async def process(bot, chat_id: int, mode: str, kind: str, data: str, status):
+async def process(bot, chat_id: int, job: dict, status):
+    ui, mode, tgt = job["ui"], job["mode"], job["tgt"]
     workdir = Path(tempfile.mkdtemp(prefix="subvid_"))
+    st = Stages()
+    PENDING.append(job["id"])
     try:
+        ahead = PENDING.index(job["id"])
+        if ahead > 0:
+            await set_status(status, T(ui, "queue", n=ahead))
         async with JOB_SEM:
-            await set_status(status, "⬇️ جاري تحميل الفيديو...")
-            video = await fetch_input(bot, kind, data, workdir, audio_only=(mode == "txt"))
+            st.reset()  # don't count the time spent waiting in the queue
+            await set_status(status, T(ui, "p_dl"))
+            video = await fetch_input(bot, job["kind"], job["data"], workdir, audio_only=(mode == "txt"))
+            st.mark("download")
 
             w, h, duration = await probe(video)
+            st.mark("probe")
             if duration and duration > MAX_MINUTES * 60:
-                raise UserError(f"الحد الأقصى لمدة المقطع {MAX_MINUTES} دقائق.")
+                raise UserError("too_long", m=MAX_MINUTES)
 
-            await set_status(status, "🎧 جاري استخراج الصوت...")
+            await set_status(status, T(ui, "p_audio"))
             audio = workdir / "audio.wav"
             await run_cmd(
                 ["ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(audio)]
             )
+            st.mark("audio")
 
-            await set_status(status, "📝 جاري تفريغ الكلام...")
-            segments, lang = await asyncio.to_thread(transcribe, str(audio))
+            await set_status(status, T(ui, "p_tr" if job["src"] else "p_tr_auto"))
+            segments, lang = await asyncio.to_thread(transcribe, str(audio), job["src"])
+            st.mark("transcribe")
             if not segments:
-                raise UserError("ما قدرت أرصد كلاماً واضحاً في المقطع.")
+                raise UserError("no_speech")
 
-            if lang != "ar":
-                await set_status(status, "🌐 جاري الترجمة إلى العربية...")
-                segments = await asyncio.to_thread(translate_segments, segments, lang)
+            if lang != tgt:
+                await set_status(status, T(ui, "p_trans"))
+                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt)
+                st.mark("translate")
 
-            srt_text = build_srt(segments)
+            keep_joiners = tgt in ("fa", "ur")
+            segments = [(s, e, clean_text(t, keep_joiners)) for s, e, t in segments]
+            segments = [x for x in segments if x[2]]
+            if not segments:
+                raise UserError("no_speech")
+
+            portrait = bool(w and h and h > w)
+            mult = SIZES[job["size_i"]][1]
+            base_chars = 28 if portrait else 40
+            max_chars = max(14, int(base_chars / mult)) if mode == "sub" else 40
+            cues = make_cues(segments, max_chars)
+            srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
             plain = "\n".join(t for _, _, t in segments)
 
             if mode == "txt":
                 if len(plain) <= 3500:
-                    await bot.send_message(chat_id, f"📄 الترجمة العربية:\n\n{plain}")
+                    await bot.send_message(chat_id, f"{T(ui, 'caption_txt')}:\n\n{plain}")
                 else:
                     (workdir / "translation.txt").write_text(plain, encoding="utf-8")
                     with open(workdir / "translation.txt", "rb") as f:
-                        await bot.send_document(chat_id, f, caption="📄 الترجمة العربية")
+                        await bot.send_document(chat_id, f, caption=T(ui, "caption_txt"))
                 with open(workdir / "subs.srt", "rb") as f:
-                    await bot.send_document(chat_id, f, filename="subtitles_ar.srt",
-                                            caption="ملف الترجمة المزمّنة (SRT)")
+                    await bot.send_document(chat_id, f, filename="subtitles.srt",
+                                            caption=T(ui, "caption_srt"))
+                st.mark("send")
             else:
-                await set_status(status, "🎬 جاري دمج الترجمة بالفيديو...")
-                out = await burn_subtitles(video, "subs.srt", workdir, w, h)
+                await set_status(status, T(ui, "p_burn"))
+                out = await burn_subtitles(video, "subs.srt", workdir, w, h, job)
+                st.mark("burn")
                 if out.stat().st_size > TG_UPLOAD_LIMIT:
                     with open(workdir / "subs.srt", "rb") as f:
-                        await bot.send_document(
-                            chat_id, f, filename="subtitles_ar.srt",
-                            caption="⚠️ الفيديو الناتج أكبر من 50MB (حد تيليجرام للبوتات)، "
-                                    "هذا ملف الترجمة بدلاً منه.",
-                        )
+                        await bot.send_document(chat_id, f, filename="subtitles.srt",
+                                                caption=T(ui, "too_big"))
                 else:
-                    await set_status(status, "📤 جاري رفع الفيديو...")
+                    await set_status(status, T(ui, "p_up"))
                     with open(out, "rb") as f:
                         await bot.send_video(chat_id, f, supports_streaming=True,
-                                             caption="✅ تم دمج الترجمة العربية.")
+                                             caption=T(ui, "caption_burn"))
+                st.mark("upload")
         try:
             await status.delete()
         except TelegramError:
             pass
     except UserError as e:
-        await set_status(status, f"⚠️ {e}")
+        await set_status(status, "⚠️ " + T(ui, e.key, **e.kw))
     except Exception:
         log.exception("job failed")
-        await set_status(status, "❌ حصل خطأ غير متوقع أثناء المعالجة. حاول مرة ثانية.")
+        await set_status(status, "❌ " + T(ui, "generic"))
     finally:
+        log.info("job %s (%s -> %s, %s) timings: %s", job["id"], job.get("src") or "auto",
+                 tgt, mode, st.summary())
+        if job["id"] in PENDING:
+            PENDING.remove(job["id"])
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- screens
+def btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, callback_data=data)
+
+
+def screen_ui_picker():
+    rows = [[btn("العربية", "ui|ar"), btn("English", "ui|en")]]
+    return T("ar", "pick_ui"), InlineKeyboardMarkup(rows)
+
+
+def screen_src(job):
+    ui, key = job["ui"], job["id"]
+    text = f"{T(ui, 'src_q')}\n\n{T(ui, 'src_note')}"
+    rows = [
+        [btn(T(ui, "src_auto"), f"src|{key}|auto")],
+        [btn(T(ui, "src_manual"), f"src|{key}|pick")],
+        [btn(T(ui, "cancel"), f"x|{key}")],
+    ]
+    return text, InlineKeyboardMarkup(rows)
+
+
+def screen_langs(job, codes, page, title_key, list_prefix, pick_prefix):
+    ui, key = job["ui"], job["id"]
+    chunk = codes[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    rows, row = [], []
+    for c in chunk:
+        row.append(btn(LANGS[c], f"{pick_prefix}|{key}|{c}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(btn("◀", f"{list_prefix}|{key}|{page - 1}"))
+    if (page + 1) * PAGE_SIZE < len(codes):
+        nav.append(btn("▶", f"{list_prefix}|{key}|{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([btn(T(ui, "cancel"), f"x|{key}")])
+    return T(ui, title_key), InlineKeyboardMarkup(rows)
+
+
+def screen_src_list(job, page=0):
+    return screen_langs(job, ordered(SOURCES, "en"), page, "pick_src", "sl", "ss")
+
+
+def screen_tgt(job, page=0):
+    return screen_langs(job, ordered(TARGETS, job["ui"]), page, "tgt_q", "tgl", "tg")
+
+
+def screen_mode(job):
+    ui, key = job["ui"], job["id"]
+    rows = [
+        [btn(T(ui, "mode_burn"), f"md|{key}|sub")],
+        [btn(T(ui, "mode_txt"), f"md|{key}|txt")],
+        [btn(T(ui, "cancel"), f"x|{key}")],
+    ]
+    return T(ui, "mode_q"), InlineKeyboardMarkup(rows)
+
+
+def screen_settings(job):
+    ui, key = job["ui"], job["id"]
+    fonts = fonts_for(job["tgt"])
+    font = fonts[job["font_i"] % len(fonts)]
+    rows = [
+        [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font")],
+        [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
+        [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
+        [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
+        [btn(T(ui, "start"), f"go|{key}")],
+        [btn(T(ui, "cancel"), f"x|{key}")],
+    ]
+    return T(ui, "settings"), InlineKeyboardMarkup(rows)
+
+
 # ---------------------------------------------------------------- handlers
+def new_job(kind: str, data: str, ui: str) -> dict:
+    key = uuid.uuid4().hex[:10]
+    JOBS[key] = {
+        "id": key, "kind": kind, "data": data, "ui": ui,
+        "src": None, "tgt": ui if ui in TARGETS else "ar", "mode": "sub",
+        "font_i": 0, "size_i": 1, "style_i": 0, "pos_i": 0,
+    }
+    while len(JOBS) > 300:
+        JOBS.popitem(last=False)
+    return JOBS[key]
+
+
+async def safe_edit(q, text, markup=None):
+    try:
+        await q.edit_message_text(text, reply_markup=markup)
+    except TelegramError as e:  # e.g. "message is not modified"
+        log.debug("edit skipped: %s", e)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        "مرحباً بك في SubVid Ai 🎬\n\n"
-        "أرسل لي رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو، "
-        "وأختار لك بين دمج الترجمة العربية بالفيديو أو استخراجها كنص."
-    )
+    msg = update.effective_message
+    ui = context.user_data.get("ui")
+    if not ui:
+        text, markup = screen_ui_picker()
+        await msg.reply_text(text, reply_markup=markup)
+    else:
+        await msg.reply_text(T(ui, "welcome"))
+
+
+async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = screen_ui_picker()
+    await update.effective_message.reply_text(text, reply_markup=markup)
 
 
 async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -423,23 +781,26 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m = URL_RE.search(msg.text)
         if m:
             kind, data = "url", m.group(0)
+
+    ui = context.user_data.get("ui")
     if not kind:
-        await msg.reply_text("أرسل رابط فيديو أو ملف فيديو.")
+        await msg.reply_text(T(ui or "ar", "send_media"))
+        return
+    if not ui:  # ask for the interface language first, keep the media for afterwards
+        context.user_data["pending"] = (kind, data)
+        text, markup = screen_ui_picker()
+        await msg.reply_text(text, reply_markup=markup)
         return
 
-    key = uuid.uuid4().hex[:10]
-    JOBS[key] = (kind, data)
-    while len(JOBS) > 300:
-        JOBS.popitem(last=False)
+    job = new_job(kind, data, ui)
+    text, markup = screen_src(job)
+    await msg.reply_text(text, reply_markup=markup)
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🎬 دمج الترجمة العربية بالفيديو", callback_data=f"sub|{key}")],
-            [InlineKeyboardButton("📄 استخراج الترجمة النصية", callback_data=f"txt|{key}")],
-            [InlineKeyboardButton("إلغاء", callback_data=f"x|{key}")],
-        ]
-    )
-    await msg.reply_text("وصلني ✅ اختر المطلوب:", reply_markup=keyboard)
+
+async def begin(context, q, job):
+    JOBS.pop(job["id"], None)
+    await safe_edit(q, T(job["ui"], "queued"))
+    context.application.create_task(process(context.bot, q.message.chat_id, job, q.message))
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -448,22 +809,75 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
     except TelegramError:
         pass
-    action, _, key = (q.data or "").partition("|")
+    parts = (q.data or "").split("|")
+    act = parts[0]
 
-    if action == "x":
-        JOBS.pop(key, None)
-        await q.edit_message_text("تم الإلغاء.")
+    if act == "ui":
+        ui = parts[1] if len(parts) > 1 and parts[1] in STR else "ar"
+        context.user_data["ui"] = ui
+        pending = context.user_data.pop("pending", None)
+        if pending:
+            job = new_job(pending[0], pending[1], ui)
+            text, markup = screen_src(job)
+            await safe_edit(q, text, markup)
+        else:
+            await safe_edit(q, T(ui, "welcome"))
         return
 
-    job = JOBS.pop(key, None)  # pop => a double tap can't start the job twice
+    key = parts[1] if len(parts) > 1 else ""
+    job = JOBS.get(key)
     if not job:
-        await q.edit_message_text("انتهت صلاحية الطلب، أعد إرسال الفيديو.")
+        await safe_edit(q, T(context.user_data.get("ui") or "ar", "expired"))
         return
+    ui = job["ui"]
 
-    status = await q.edit_message_text("⏳ في قائمة الانتظار...")
-    context.application.create_task(
-        process(context.bot, q.message.chat_id, action, job[0], job[1], status)
-    )
+    if act == "x":
+        JOBS.pop(key, None)
+        await safe_edit(q, T(ui, "cancelled"))
+    elif act == "src":
+        if parts[2] == "auto":
+            job["src"] = None
+            text, markup = screen_tgt(job)
+        else:
+            text, markup = screen_src_list(job)
+        await safe_edit(q, text, markup)
+    elif act == "sl":
+        text, markup = screen_src_list(job, int(parts[2]))
+        await safe_edit(q, text, markup)
+    elif act == "ss":
+        job["src"] = parts[2] if parts[2] in LANGS else None
+        text, markup = screen_tgt(job)
+        await safe_edit(q, text, markup)
+    elif act == "tgl":
+        text, markup = screen_tgt(job, int(parts[2]))
+        await safe_edit(q, text, markup)
+    elif act == "tg":
+        if parts[2] in TARGETS:
+            job["tgt"] = parts[2]
+            job["font_i"] = 0
+        text, markup = screen_mode(job)
+        await safe_edit(q, text, markup)
+    elif act == "md":
+        job["mode"] = "txt" if parts[2] == "txt" else "sub"
+        if job["mode"] == "txt":
+            await begin(context, q, job)
+        else:
+            text, markup = screen_settings(job)
+            await safe_edit(q, text, markup)
+    elif act == "cy":
+        field = parts[2]
+        if field == "font":
+            job["font_i"] = (job["font_i"] + 1) % len(fonts_for(job["tgt"]))
+        elif field == "size":
+            job["size_i"] = (job["size_i"] + 1) % len(SIZES)
+        elif field == "style":
+            job["style_i"] = (job["style_i"] + 1) % len(STYLES)
+        elif field == "pos":
+            job["pos_i"] = (job["pos_i"] + 1) % len(POSITIONS)
+        text, markup = screen_settings(job)
+        await safe_edit(q, text, markup)
+    elif act == "go":
+        await begin(context, q, job)
 
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
@@ -490,6 +904,7 @@ def main():
         .build()
     )
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
+    app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
@@ -497,7 +912,9 @@ def main():
             on_input,
         )
     )
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(sub|txt|x)\|"))
+    app.add_handler(
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|go|x)(\||$)")
+    )
     app.add_error_handler(on_error)
 
     if WEBHOOK_URL:
