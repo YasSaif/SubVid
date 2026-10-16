@@ -16,8 +16,8 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
+import httpx
 import yt_dlp
-from deep_translator import GoogleTranslator
 from faster_whisper import WhisperModel
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, TelegramError
@@ -86,30 +86,76 @@ def transcribe(audio_path: str):
 
 
 # -------------------------------------------------------------- translate
-def _translate_text(text: str) -> str:
-    """Translate one string to Arabic; retry with exponential backoff."""
-    delay = 2
-    for attempt in range(4):
-        try:
-            res = GoogleTranslator(source="auto", target="ar").translate(text)
-            if res:
-                return res
-        except Exception as e:  # network / rate limit
-            log.warning("translate attempt %d failed: %s", attempt + 1, str(e)[:150])
-        if attempt < 3:
-            time.sleep(delay)
-            delay *= 2
-    raise RuntimeError("translation failed")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional: official Google Cloud Translation key
+MAX_CHUNK = 450  # chars per request (MyMemory limit is ~500 bytes)
+_cooldown: dict = {}  # provider name -> unix time until which it is skipped
 
 
-def translate_segments(segments):
-    """Translate with a few big requests (Google blocks many small ones)."""
+def _tr_official(text: str, src: str) -> str:
+    r = httpx.post(
+        "https://translation.googleapis.com/language/translate/v2",
+        params={"key": GOOGLE_API_KEY},
+        data={"q": text, "target": "ar", "format": "text"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()["data"]["translations"][0]["translatedText"]
+
+
+def _tr_gtx(text: str, src: str) -> str:
+    r = httpx.post(
+        "https://translate.googleapis.com/translate_a/single",
+        params={"client": "gtx", "sl": "auto", "tl": "ar", "dt": "t"},
+        data={"q": text},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return "".join(part[0] for part in r.json()[0] if part and part[0])
+
+
+def _tr_mymemory(text: str, src: str) -> str:
+    r = httpx.get(
+        "https://api.mymemory.translated.net/get",
+        params={"q": text, "langpair": f"{src}|ar"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    d = r.json()
+    out = (d.get("responseData") or {}).get("translatedText") or ""
+    if str(d.get("responseStatus")) != "200" or "MYMEMORY WARNING" in out:
+        raise RuntimeError(str(d.get("responseDetails") or out)[:100])
+    return out
+
+
+def _translate_text(text: str, src: str) -> str:
+    """Try providers in order; a provider that keeps failing is skipped for 10 minutes."""
+    providers = []
+    if GOOGLE_API_KEY:
+        providers.append(("google_api", _tr_official))
+    providers += [("gtx", _tr_gtx), ("mymemory", _tr_mymemory)]
+    for name, fn in providers:
+        if _cooldown.get(name, 0) > time.time():
+            continue
+        for attempt in range(2):
+            try:
+                res = fn(text, src)
+                if res and res.strip():
+                    return res
+            except Exception as e:
+                log.warning("translate via %s failed (try %d): %s", name, attempt + 1, str(e)[:120])
+                time.sleep(1)
+        _cooldown[name] = time.time() + 600
+    raise RuntimeError("all translation providers failed")
+
+
+def translate_segments(segments, src: str = "auto"):
+    """Translate to Arabic in a few small batches (one segment per line)."""
     texts = [" ".join(t.split()) for _, _, t in segments]
 
-    # group segments into chunks of <= ~3500 chars, one segment per line
     chunks, cur, size = [], [], 0
     for i, t in enumerate(texts):
-        if cur and size + len(t) + 1 > 3500:
+        if cur and size + len(t) + 1 > MAX_CHUNK:
             chunks.append(cur)
             cur, size = [], 0
         cur.append(i)
@@ -122,7 +168,7 @@ def translate_segments(segments):
     for idxs in chunks:
         joined = "\n".join(texts[i] for i in idxs)
         try:
-            out = _translate_text(joined).split("\n")
+            out = _translate_text(joined, src).split("\n")
         except Exception:
             log.warning("chunk translation failed; keeping original text for it")
             continue
@@ -132,15 +178,14 @@ def translate_segments(segments):
             ok += len(idxs)
             time.sleep(0.5)
             continue
-        # line count changed -> translate this chunk segment by segment, slowly
         log.warning("line count mismatch (%d vs %d); translating one by one", len(out), len(idxs))
         for i in idxs:
             try:
-                result[i] = _translate_text(texts[i])
+                result[i] = _translate_text(texts[i], src)
                 ok += 1
             except Exception:
                 pass
-            time.sleep(0.4)  # stay under ~5 requests/second
+            time.sleep(0.4)
 
     if ok == 0:
         raise UserError("تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.")
@@ -314,7 +359,7 @@ async def process(bot, chat_id: int, mode: str, kind: str, data: str, status):
 
             if lang != "ar":
                 await set_status(status, "🌐 جاري الترجمة إلى العربية...")
-                segments = await asyncio.to_thread(translate_segments, segments)
+                segments = await asyncio.to_thread(translate_segments, segments, lang)
 
             srt_text = build_srt(segments)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
