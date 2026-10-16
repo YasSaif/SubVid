@@ -14,7 +14,6 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yt_dlp
@@ -87,25 +86,65 @@ def transcribe(audio_path: str):
 
 
 # -------------------------------------------------------------- translate
-def _translate_one(text: str):
-    for _ in range(3):
+def _translate_text(text: str) -> str:
+    """Translate one string to Arabic; retry with exponential backoff."""
+    delay = 2
+    for attempt in range(4):
         try:
             res = GoogleTranslator(source="auto", target="ar").translate(text)
             if res:
-                return res, True
+                return res
         except Exception as e:  # network / rate limit
-            log.warning("translate retry: %s", e)
-            time.sleep(1)
-    return text, False
+            log.warning("translate attempt %d failed: %s", attempt + 1, str(e)[:150])
+        if attempt < 3:
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("translation failed")
 
 
 def translate_segments(segments):
-    texts = [t for _, _, t in segments]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(_translate_one, texts))
-    if not any(ok for _, ok in results):
+    """Translate with a few big requests (Google blocks many small ones)."""
+    texts = [" ".join(t.split()) for _, _, t in segments]
+
+    # group segments into chunks of <= ~3500 chars, one segment per line
+    chunks, cur, size = [], [], 0
+    for i, t in enumerate(texts):
+        if cur and size + len(t) + 1 > 3500:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(i)
+        size += len(t) + 1
+    if cur:
+        chunks.append(cur)
+
+    result = list(texts)
+    ok = 0
+    for idxs in chunks:
+        joined = "\n".join(texts[i] for i in idxs)
+        try:
+            out = _translate_text(joined).split("\n")
+        except Exception:
+            log.warning("chunk translation failed; keeping original text for it")
+            continue
+        if len(out) == len(idxs):
+            for i, line in zip(idxs, out):
+                result[i] = line.strip() or texts[i]
+            ok += len(idxs)
+            time.sleep(0.5)
+            continue
+        # line count changed -> translate this chunk segment by segment, slowly
+        log.warning("line count mismatch (%d vs %d); translating one by one", len(out), len(idxs))
+        for i in idxs:
+            try:
+                result[i] = _translate_text(texts[i])
+                ok += 1
+            except Exception:
+                pass
+            time.sleep(0.4)  # stay under ~5 requests/second
+
+    if ok == 0:
         raise UserError("تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.")
-    return [(s, e, r[0]) for (s, e, _), r in zip(segments, results)]
+    return [(s, e, r) for (s, e, _), r in zip(segments, result)]
 
 
 # -------------------------------------------------------------------- srt
