@@ -49,6 +49,7 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
 MAX_RES = int(os.environ.get("MAX_RES", "480"))  # max size of the SMALLER video side (480 = 480x854 portrait)
 USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (saves RAM, may add noise text)
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
+DEBUG_TEXT = os.environ.get("DEBUG_TEXT") == "1"
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))          # burn-in video (slow on the free CPU)
 MAX_MINUTES_TXT = int(os.environ.get("MAX_MINUTES_TXT", "25"))  # text + SRT only (Groq accepts files up to 25MB)
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
@@ -386,7 +387,8 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = ""):
             a, b = inside[0][0], inside[-1][1]
         out.append((a + SUB_DELAY, b + SUB_DELAY, text))
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
-    log.info("second opinion (%s): %s", other, alt[:400])
+    if DEBUG_TEXT:
+        log.info("second opinion (%s): %s", other, alt[:400])
     return out, lang, alt
 
 
@@ -480,7 +482,7 @@ LANG_NAME_TO_CODE = {
 }
 
 
-_LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]) if m]
+_LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]) if m]
 _llm_bad: dict = {}   # model -> time until which it is skipped
 
 
@@ -1526,7 +1528,8 @@ async def process(bot, chat_id: int, job: dict, status):
             vocab = ", ".join(dict.fromkeys(gl.values()))[:500]
             segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"], vocab)
             st.mark("transcribe")
-            log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
+            if DEBUG_TEXT:   # transcripts are private: only logged when DEBUG_TEXT=1 is set on Render
+                log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
                 raise UserError("no_speech")
 
