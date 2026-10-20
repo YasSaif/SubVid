@@ -80,7 +80,7 @@ class _RingLog(logging.Handler):
     """Keeps the last log lines in memory so the admin can get them with /logs (no server access needed)."""
     def __init__(self):
         super().__init__()
-        self.lines = collections.deque(maxlen=400)
+        self.lines = collections.deque(maxlen=int(os.environ.get("LOG_LINES", "3000")))
 
     def emit(self, record):
         try:
