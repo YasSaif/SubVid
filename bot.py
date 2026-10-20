@@ -111,7 +111,13 @@ FONTS_AR = ["Noto Naskh Arabic", "Amiri", "DejaVu Sans", "FreeSerif"]
 CANDIDATES_AR_ALL = FONTS_AR + ["Noto Sans Arabic", "Noto Kufi Arabic"]
 if os.environ.get("ENABLE_BROKEN_FONTS") == "1":
     FONTS_AR = list(CANDIDATES_AR_ALL)
-FONT_SCALE = {"Amiri": 1.3}   # Amiri's letters are drawn smaller than other fonts at the same size
+# Same pixel size looks different per font (measured on the /fonts preview): evened out relative to Noto Naskh.
+FONT_SCALE_AR = {"Amiri": 1.45, "DejaVu Sans": 0.62, "FreeSerif": 0.78}
+FONT_SCALE_LAT = {"DejaVu Sans": 0.92, "DejaVu Serif": 0.92}
+
+
+def font_scale(font: str, group: str) -> float:
+    return (FONT_SCALE_AR if group == "ar" else FONT_SCALE_LAT).get(font, 1.0)
 FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
@@ -669,7 +675,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
              STYLES[job["style_i"]], POSITIONS[job["pos_i"]][0], w, h)
     mult = SIZES[job["size_i"]][1]
     base = 12 if portrait else 17  # relative to a 288px-high canvas
-    font_size = max(6, round(base * mult * FONT_SCALE.get(font, 1.0)))
+    font_size = max(6, round(base * mult * font_scale(font, "ar" if job["tgt"] in ARABIC_SCRIPT else "lat")))
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
     if align == 2:
@@ -1112,7 +1118,7 @@ async def font_preview(group: str):
     events = []
     for i, name in enumerate(fonts):
         y = 8 + row_h * i + row_h // 2
-        size = round(30 * FONT_SCALE.get(name, 1.0))
+        size = round(30 * 1.2 * font_scale(name, group))
         events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,L,,0,0,0,,{{\\an4\\pos(16,{y})\\fnNoto Sans\\fs20\\1c&H00B0B0B0&}}{i + 1}. {name}")
         events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,S,,0,0,0,,{{\\an6\\pos({width - 16},{y})\\fn{name}\\fs{size}}}{sample}")
     ass = (
