@@ -168,7 +168,7 @@ def fonts_for(tgt: str):
 STR = {
     "ar": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأنا بوت يحوّل كلام الفيديو إلى ترجمة مكتوبة:\n\n🎙 أستخرج الكلام من الفيديو بدقة (أي لغة)\n🌍 أترجمه إلى لغتك مع مراجعة تلقائية للأخطاء\n🎬 أدمج الترجمة على الفيديو بالخط والحجم والنمط والمكان الذي تختاره\n🌐 ترجمة ثنائية اللغة إذا حبيت\n📝 أو أعطيك النص مع ملف SRT لتعدّله وأعيد دمجه\n\n▶️ ابدأ: أرسل رابط فيديو (تيك توك أو رابط مباشر) أو ملف فيديو.\n⏱ أقصى مدة للمقطع: " + str(MAX_MINUTES) + " دقائق.\n(يوتيوب غير مدعوم حاليًا، أرسل الفيديو كملف.)\n\n🔒 خصوصيتك: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة: /language",
+        "welcome": "✅ تم اختيار اللغة.\n\n🎬 ماذا يفعل SubVid Ai؟\n🎙 يستخرج الكلام من الفيديو بدقة (أي لغة)\n🌍 يترجمه إلى لغتك مع مراجعة تلقائية للأخطاء\n🎞 يدمج الترجمة على الفيديو أو الفيلم نفسه (مثل ترجمة الأفلام) بالخط والحجم والنمط والمكان الذي تختاره\n🌐 ترجمة ثنائية اللغة (لغتين معًا) إذا حبيت\n📝 أو يعطيك النص مع ملف SRT لتعدّله ثم يعيد دمجه\n\n📥 ما المدعوم؟\n• رابط تيك توك\n• رابط فيديو مباشر\n• ملف فيديو من جوالك (حتى 20MB)\n• يوتيوب غير مدعوم حاليًا، أرسل الفيديو كملف\n\n⏱ أقصى مدة للمقطع: " + str(MAX_MINUTES) + " دقائق\n\n▶️ ابدأ الآن: أرسل الرابط أو الفيديو.\n\n🔒 الخصوصية: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة: /language",
         "send_media": "أرسل رابط فيديو أو ملف فيديو.",
         "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
         "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
@@ -236,7 +236,7 @@ STR = {
     },
     "en": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "Welcome to SubVid Ai 🎬\n\nI turn the speech in your videos into written subtitles:\n\n🎙 I transcribe the speech accurately (any language)\n🌍 I translate it into your language with an automatic error review\n🎬 I burn the subtitles into the video with the font, size, style and position you choose\n🌐 Bilingual subtitles if you like\n📝 Or I give you the text plus an SRT file to edit and burn again\n\n▶️ To start: send a video link (TikTok or a direct link) or a video file.\n⏱ Maximum clip length: " + str(MAX_MINUTES) + " minutes.\n(YouTube is not supported right now; send the video as a file.)\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
+        "welcome": "✅ Language set.\n\n🎬 What does SubVid Ai do?\n🎙 Transcribes the speech in your video accurately (any language)\n🌍 Translates it into your language with an automatic error review\n🎞 Burns the subtitles into the video or film itself (like movie subtitles), with the font, size, style and position you choose\n🌐 Bilingual subtitles (two languages together) if you like\n📝 Or gives you the text plus an SRT file to edit and burn again\n\n📥 What is supported?\n• TikTok links\n• Direct video links\n• A video file from your phone (up to 20MB)\n• YouTube is not supported right now; send the video as a file\n\n⏱ Maximum clip length: " + str(MAX_MINUTES) + " minutes\n\n▶️ Start now: send the link or the video.\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
         "send_media": "Send a video link or a video file.",
         "src_q": "🔍 How should we find the spoken language in the clip?",
         "src_note": "ℹ️ Auto-detect may take a little longer; choosing the language manually is usually faster and more accurate.",
@@ -2123,7 +2123,9 @@ def btn(text: str, data: str) -> InlineKeyboardButton:
 
 def screen_ui_picker():
     rows = [[btn("العربية", "ui|ar"), btn("English", "ui|en")]]
-    return T("ar", "pick_ui"), InlineKeyboardMarkup(rows)
+    intro = ("🎬 SubVid Ai\nبوت يترجم كلام الفيديو ويكتب الترجمة على الفيديو نفسه.\n"
+             "A bot that translates the speech in your videos and burns the subtitles into them.\n\n")
+    return intro + T("ar", "pick_ui"), InlineKeyboardMarkup(rows)
 
 
 def nav_row(job, back):
@@ -2281,7 +2283,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, markup = screen_ui_picker()
         await msg.reply_text(text, reply_markup=markup)
     else:
-        await msg.reply_text(T(ui, "welcome"))
+        await msg.reply_text(T(ui, "welcome").split("\n\n", 1)[1])   # same text without the "language set" line
 
 
 async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
