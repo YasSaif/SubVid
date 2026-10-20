@@ -188,7 +188,7 @@ STR = {
         "style_green": "أخضر", "style_cyan": "سماوي", "style_orange": "برتقالي", "style_pink": "وردي", "style_thick": "إطار سميك", "style_shadow": "ظل ناعم",
         "style_preview": "🎭 معاينة الأنماط", "style_preview_cap": "🎭 الأنماط بالترتيب اللي تتغير فيه عند الضغط على زر «النمط»",
         "pos_bottom": "أسفل", "pos_middle": "وسط", "pos_top": "أعلى",
-        "start": "▶️ ابدأ", "cancel": "إلغاء", "cancelled": "تم الإلغاء.",
+        "start": "▶️ ابدأ", "back": "🔙 رجوع", "cancel": "إلغاء", "cancelled": "تم الإلغاء.",
         "expired": "انتهت صلاحية الطلب، أعد إرسال الفيديو.",
         "queued": "⏳ جاري التجهيز...",
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
@@ -255,7 +255,7 @@ STR = {
         "style_green": "Green", "style_cyan": "Cyan", "style_orange": "Orange", "style_pink": "Pink", "style_thick": "Thick outline", "style_shadow": "Soft shadow",
         "style_preview": "🎭 Preview styles", "style_preview_cap": "🎭 Styles in the order the «Style» button cycles through them",
         "pos_bottom": "Bottom", "pos_middle": "Middle", "pos_top": "Top",
-        "start": "▶️ Start", "cancel": "Cancel", "cancelled": "Cancelled.",
+        "start": "▶️ Start", "back": "🔙 Back", "cancel": "Cancel", "cancelled": "Cancelled.",
         "expired": "This request expired, please send the video again.",
         "queued": "⏳ Preparing...",
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
@@ -2109,6 +2109,16 @@ def screen_ui_picker():
     return T("ar", "pick_ui"), InlineKeyboardMarkup(rows)
 
 
+def nav_row(job, back):
+    """Back (to a named screen) next to Cancel, so a mis-tap never throws the upload away."""
+    ui, key = job["ui"], job["id"]
+    row = []
+    if back:
+        row.append(btn(T(ui, "back"), f"bk|{key}|{back}"))
+    row.append(btn(T(ui, "cancel"), f"x|{key}"))
+    return row
+
+
 def screen_src(job):
     ui, key = job["ui"], job["id"]
     text = f"{T(ui, 'src_q')}\n\n{T(ui, 'src_note')}"
@@ -2121,7 +2131,7 @@ def screen_src(job):
     return text, InlineKeyboardMarkup(rows)
 
 
-def screen_langs(job, codes, page, title_key, list_prefix, pick_prefix):
+def screen_langs(job, codes, page, title_key, list_prefix, pick_prefix, back=None):
     ui, key = job["ui"], job["id"]
     chunk = codes[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
     rows, row = [], []
@@ -2139,16 +2149,16 @@ def screen_langs(job, codes, page, title_key, list_prefix, pick_prefix):
         nav.append(btn("▶", f"{list_prefix}|{key}|{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([btn(T(ui, "cancel"), f"x|{key}")])
+    rows.append(nav_row(job, back))
     return T(ui, title_key), InlineKeyboardMarkup(rows)
 
 
 def screen_src_list(job, page=0):
-    return screen_langs(job, ordered(SOURCES, "en"), page, "pick_src", "sl", "ss")
+    return screen_langs(job, ordered(SOURCES, "en"), page, "pick_src", "sl", "ss", back="src")
 
 
 def screen_tgt(job, page=0):
-    return screen_langs(job, ordered(TARGETS, job["ui"]), page, "tgt_q", "tgl", "tg")
+    return screen_langs(job, ordered(TARGETS, job["ui"]), page, "tgt_q", "tgl", "tg", back="src")
 
 
 def screen_mode(job):
@@ -2156,7 +2166,7 @@ def screen_mode(job):
     rows = [
         [btn(T(ui, "mode_burn"), f"md|{key}|sub")],
         [btn(T(ui, "mode_txt"), f"md|{key}|txt")],
-        [btn(T(ui, "cancel"), f"x|{key}")],
+        nav_row(job, "tgt"),
     ]
     return T(ui, "mode_q"), InlineKeyboardMarkup(rows)
 
@@ -2206,7 +2216,7 @@ def screen_settings(job):
         [btn(f"🌐 {T(ui, 'bi')}: {bi_label(job)}", f"bi|{key}")],
         [btn(T(ui, "preview"), f"sp|{key}")],
         [btn(T(ui, "start"), f"go|{key}")],
-        [btn(T(ui, "cancel"), f"x|{key}")],
+        nav_row(job, "mode"),
     ]
     return T(ui, "settings"), InlineKeyboardMarkup(rows)
 
@@ -2412,7 +2422,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, text, markup)
         await live_preview(context, q.message.chat_id, job)
     elif act == "bk":
-        text, markup = screen_settings(job)
+        where = parts[2] if len(parts) > 2 else "set"
+        text, markup = {"src": screen_src, "tgt": screen_tgt, "mode": screen_mode}.get(where, screen_settings)(job)
         await safe_edit(q, text, markup)
     elif act == "cy":
         field = parts[2]
