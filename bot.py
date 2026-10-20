@@ -2654,6 +2654,14 @@ async def filter_fonts():
     log.info("fonts offered: arabic=%s latin=%s", FONTS_AR, FONTS_LAT)
 
 
+_BG_TASKS: list = []
+
+
+async def post_shutdown(app: Application):
+    for t in _BG_TASKS:
+        t.cancel()
+
+
 async def db_keepalive(bot):
     """Supabase's free plan pauses an idle project after a week: touch it every day."""
     while True:
@@ -2678,7 +2686,7 @@ async def post_init(app: Application):
     else:
         await asyncio.to_thread(get_model)  # warm up so the first request is fast
     if DB_OK:
-        app.create_task(db_keepalive(app.bot))
+        _BG_TASKS.append(asyncio.get_running_loop().create_task(db_keepalive(app.bot)))
     log.info("startup complete, memory in use: %s", mem_now())
     await notify_admin(app.bot, f"🟢 البوت اشتغل (تشغيل جديد)\nالذاكرة: {mem_now()}\nقاعدة البيانات: {DB_STATUS}", key="startup")
 
@@ -2689,6 +2697,7 @@ def main():
         ApplicationBuilder()
         .token(TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .concurrent_updates(True)
         .connect_timeout(30)
         .read_timeout(30)
