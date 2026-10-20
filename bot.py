@@ -3003,7 +3003,7 @@ def main():
     app.add_handler(CommandHandler("fonttest", cmd_fonttest))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("diag", cmd_diag))
-    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
         MessageHandler(
