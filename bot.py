@@ -207,7 +207,7 @@ STR = {
         "caption_edit": "✅ تم تطبيق تعديلاتك.",
         "bi": "ثنائية اللغة", "bi_src": "اللغة الأصلية للفيديو", "bi_off": "إيقاف", "bi_back": "↩ رجوع",
         "bi_pick": "🌐 اختر اللغة الثانية التي تظهر تحت الترجمة بخط أصغر.\n«اللغة الأصلية» تعرض ما قيل في الفيديو بعد تصحيحه.", "on": "مفعّلة", "off": "متوقفة",
-        "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
+        "quick": "🔁 بإعداداتي السابقة (تلقائي ➜ {tgt})", "fast": "⚡ بدء سريع (كل الإعدادات افتراضية)",
         "card_title": "تم بنجاح", "card_from": "من", "card_to": "إلى", "card_len": "مدة المقطع",
         "card_time": "وقت المعالجة", "card_count": "عدد الترجمات", "card_font": "الخط", "card_words": "الكلمات",
         "step_dl": "تحميل الفيديو", "step_audio": "استخراج الصوت", "step_tr": "تفريغ الكلام",
@@ -275,7 +275,7 @@ STR = {
         "caption_edit": "✅ Your edits were applied.",
         "bi": "Bilingual", "bi_src": "Original language", "bi_off": "Off", "bi_back": "↩ Back",
         "bi_pick": "🌐 Choose the second language shown under the translation in a smaller font.\n\"Original language\" shows what was said in the video, corrected.", "on": "On", "off": "Off",
-        "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
+        "quick": "🔁 With my last settings (auto ➜ {tgt})", "fast": "⚡ Quick start (all default settings)",
         "card_title": "Done", "card_from": "From", "card_to": "To", "card_len": "Clip length",
         "card_time": "Processing time", "card_count": "Subtitles", "card_font": "Font", "card_words": "Words",
         "step_dl": "Downloading the video", "step_audio": "Extracting audio", "step_tr": "Transcribing speech",
@@ -2143,6 +2143,7 @@ def screen_src(job):
     ui, key = job["ui"], job["id"]
     text = f"{T(ui, 'src_q')}\n\n{T(ui, 'src_note')}"
     rows = [
+        [btn(T(ui, "fast"), f"fs|{key}")],
         [btn(T(ui, "src_auto"), f"src|{key}|auto")],
         [btn(T(ui, "src_manual"), f"src|{key}|pick")],
         *([[btn(T(ui, "quick", tgt=LANGS.get(job["tgt"], job["tgt"])), f"qk|{key}")]] if job.get("saved") else []),
@@ -2350,7 +2351,9 @@ async def begin(context, q, job):
         ACTIVE.add(uid)
     JOBS.pop(job["id"], None)
     if job.get("uid"):
-        uprefs(job["uid"]).update({k: job[k] for k in ("tgt", "mode", "font_i", "size_i", "style_i", "pos_i", "bi")})
+        # quick start must not overwrite the person's saved custom settings: only remember the language
+        keys = ("tgt",) if job.get("fast") else ("tgt", "mode", "font_i", "size_i", "style_i", "pos_i", "bi")
+        uprefs(job["uid"]).update({k: job[k] for k in keys})
         save_prefs()
     await safe_edit(q, T(job["ui"], "queued"))
     context.application.create_task(process(context.bot, q.message.chat_id, job, q.message))
@@ -2419,10 +2422,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif act == "tgl":
         text, markup = screen_tgt(job, int(parts[2]))
         await safe_edit(q, text, markup)
+    elif act == "fs":
+        # quick start: everything default, only the translation language is asked
+        job.update({"fast": True, "src": None, "mode": "sub", "font_i": 0, "size_i": 1,
+                    "style_i": 0, "pos_i": 0, "bi": False})
+        text, markup = screen_tgt(job)
+        await safe_edit(q, text, markup)
     elif act == "tg":
         if parts[2] in TARGETS:
             job["tgt"] = parts[2]
             job["font_i"] = 0
+        if job.get("fast"):
+            await begin(context, q, job)
+            return
         text, markup = screen_mode(job)
         await safe_edit(q, text, markup)
     elif act == "md":
@@ -2443,6 +2455,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await live_preview(context, q.message.chat_id, job)
     elif act == "bk":
         where = parts[2] if len(parts) > 2 else "set"
+        if where == "src":
+            job["fast"] = False
         text, markup = {"src": screen_src, "tgt": screen_tgt, "mode": screen_mode}.get(where, screen_settings)(job)
         await safe_edit(q, text, markup)
     elif act == "cy":
@@ -3017,7 +3031,7 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|rt|bi|bil|bp|bk|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|fs|tx|rt|bi|bil|bp|bk|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
