@@ -48,11 +48,11 @@ WEBHOOK_URL = (
     or ""
 ).rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
-MAX_RES = int(os.environ.get("MAX_RES", "480"))  # max size of the SMALLER video side (480 = 480x854 portrait)
+MAX_RES = int(os.environ.get("VIDEO_MAX_RES", "1080"))  # max size of the SMALLER video side (480 = 480x854 portrait)
 USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (saves RAM, may add noise text)
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
 DEBUG_TEXT = os.environ.get("DEBUG_TEXT") == "1"
-MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))          # burn-in video (slow on the free CPU)
+MAX_MINUTES = int(os.environ.get("CLIP_MAX_MINUTES", "20"))          # burn-in video (slow on the free CPU)
 MAX_MINUTES_TXT = int(os.environ.get("MAX_MINUTES_TXT", "25"))  # text + SRT only (Groq accepts files up to 25MB)
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
 BURN_THREADS = os.environ.get("BURN_THREADS", "1")   # raise on a bigger server (e.g. 4)
@@ -393,7 +393,7 @@ def _groq_asr(audio_path: str, model: str, language, detailed: bool, vocab: str 
         r = httpx.post(
             "https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            data=data, files={"file": ("audio.flac", f, "audio/flac")}, timeout=120,
+            data=data, files={"file": ("audio.ogg", f, "audio/ogg")}, timeout=120,
         )
     if r.status_code >= 400:
         raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
@@ -952,13 +952,30 @@ async def probe(video: Path):
     return w, h, duration
 
 
-LONG_CLIP_SEC = int(os.environ.get("LONG_CLIP_SEC", "300"))   # clips longer than this are burned at 360p (about 2x faster)
+
+
+
+UPLOAD_MB = 44   # Telegram bots can upload up to 50MB; stay under it
+
+
+def video_kbps(duration: float) -> int:
+    """Video bitrate that keeps the burned file under UPLOAD_MB for this duration."""
+    if duration <= 0:
+        return 5000
+    return max(250, min(5000, int(UPLOAD_MB * 8 * 1024 / duration - 64)))
+
+
+def target_res(duration: float) -> int:
+    """Highest picture size (short side) that still gets enough bitrate to look good inside the upload limit."""
+    kbps = video_kbps(duration)
+    res = 1080 if kbps >= 2500 else 720 if kbps >= 1200 else 480 if kbps >= 550 else 360
+    return min(MAX_RES, res)
 
 
 def out_size(w: int, h: int, duration: float = 0.0):
-    """Size of the burned video: short side = MAX_RES, or 360 for long clips (same rule burn_subtitles uses)."""
-    res = MAX_RES if duration <= LONG_CLIP_SEC else min(MAX_RES, 360)
+    """Size of the burned video: short side from target_res (never upscaled beyond the source)."""
     short = min(w, h)
+    res = min(target_res(duration), short) if short else target_res(duration)
     if short and short != res:
         f = res / short
         return int(w * f) // 2 * 2, int(h * f) // 2 * 2
@@ -1060,8 +1077,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     # keep the file under Telegram's bot upload limit: cap the video bitrate by what fits in ~44MB for this duration
     rate = []
     if duration > 0:
-        kbps = int((44 * 8 * 1024) / duration - 64)
-        kbps = max(250, min(2500, kbps))
+        kbps = video_kbps(duration)
         rate = ["-maxrate", f"{kbps}k", "-bufsize", f"{kbps * 2}k"]
     await run_ffmpeg(
         [
@@ -1092,7 +1108,7 @@ def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 3,
-        "max_filesize": 300 * 1024 * 1024,
+        "max_filesize": 600 * 1024 * 1024,
     }
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
@@ -2023,11 +2039,11 @@ async def process(bot, chat_id: int, job: dict, status):
 
             await prog.step("audio")
             # clean the audio (rumble/hiss, uneven volume) so recognition doesn't depend on recording quality
-            audio = workdir / "audio.flac"
+            audio = workdir / "audio.ogg"
             await run_cmd(
                 ["ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000",
                  "-af", "highpass=f=80,lowpass=f=7600,afftdn=nf=-28,dynaudnorm=f=150:g=15",
-                 str(audio)]
+                 "-c:a", "libopus", "-b:a", "48k", "-application", "audio", str(audio)]
             )
             st.mark("audio")
             if audio.stat().st_size > 24 * 1024 * 1024:
