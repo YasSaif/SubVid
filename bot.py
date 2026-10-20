@@ -51,12 +51,23 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
 BASE_DIR = Path(__file__).resolve().parent
 
 
+def _find_tgapi():
+    """telegram-bot-api binary: built into the image, or built later by /buildlocal into /app/bin (survives restarts)."""
+    for c in (BASE_DIR / "bin" / "telegram-bot-api", shutil.which("telegram-bot-api")):
+        if c and Path(c).exists():
+            return str(c)
+    return None
+
+
+TGAPI_BIN = _find_tgapi()
+
+
 def _load_local_api():
     """Own Telegram Bot API server (no 20MB/50MB limits). Active only if api_id/api_hash were saved AND the binary exists."""
     try:
         d = json.loads((BASE_DIR / "localapi.json").read_text(encoding="utf-8"))
         i, h = str(d["api_id"]).strip(), str(d["api_hash"]).strip()
-        if i.isdigit() and re.fullmatch(r"[0-9a-fA-F]{32}", h) and shutil.which("telegram-bot-api"):
+        if i.isdigit() and re.fullmatch(r"[0-9a-fA-F]{32}", h) and TGAPI_BIN:
             return i, h
     except Exception:
         pass
@@ -3070,6 +3081,56 @@ async def cmd_localapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(msg.chat_id, f"✅ تم حفظ المفاتيح، وحذفت رسالتك. السيرفر المحلي: {state}.")
 
 
+BUILD_SCRIPT = r"""
+set -ex
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends make git zlib1g-dev libssl-dev gperf cmake g++ ca-certificates
+rm -rf /tmp/tgsrc /tmp/tgout
+git clone --recursive --depth 1 --shallow-submodules https://github.com/tdlib/telegram-bot-api.git /tmp/tgsrc
+mkdir /tmp/tgsrc/build && cd /tmp/tgsrc/build
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=/tmp/tgout ..
+cmake --build . --target install -j4
+mkdir -p /app/bin
+cp /tmp/tgout/bin/telegram-bot-api /app/bin/telegram-bot-api
+strip /app/bin/telegram-bot-api
+rm -rf /tmp/tgsrc /tmp/tgout
+"""
+
+
+async def cmd_buildlocal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: builds the own Bot API server inside the running container (10-20 min), then reports."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    if TGAPI_BIN:
+        await msg.reply_text("✅ السيرفر المحلي مبني أصلًا. أرسل /update ليبدأ التحويل.")
+        return
+    if context.application.bot_data.get("building"):
+        await msg.reply_text("⏳ البناء شغّال الآن.")
+        return
+    context.application.bot_data["building"] = True
+    await msg.reply_text("🔧 بدأ بناء السيرفر المحلي (10 إلى 20 دقيقة). سأخبرك عند الانتهاء. البوت يشتغل طبيعي أثناء ذلك.")
+    chat_id = msg.chat_id
+
+    async def _run():
+        try:
+            proc = await asyncio.create_subprocess_exec("bash", "-c", BUILD_SCRIPT, stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.STDOUT)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+            tail = out.decode("utf-8", "replace")[-1200:]
+            if proc.returncode == 0 and (BASE_DIR / "bin" / "telegram-bot-api").exists():
+                await context.bot.send_message(chat_id, "✅ انبنى السيرفر المحلي. الآن أرسل /update ليبدأ التحويل (يتوقف البوت حوالي 11 دقيقة مرة وحدة).")
+            else:
+                await context.bot.send_message(chat_id, f"❌ فشل البناء (رمز {proc.returncode}). آخر الأسطر:\n{tail}")
+        except Exception as e:
+            await context.bot.send_message(chat_id, f"❌ فشل البناء: {type(e).__name__}: {e}")
+        finally:
+            context.application.bot_data["building"] = False
+
+    asyncio.create_task(_run())
+
+
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin only: restart the bot; on the own server the container pulls the newest code from GitHub on start."""
     if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
@@ -3171,7 +3232,7 @@ def start_local_api() -> bool:
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     logf = open(work.parent / "tgapi.log", "ab")
-    proc = subprocess.Popen(["telegram-bot-api", "--local", f"--api-id={api_id}", f"--api-hash={api_hash}",
+    proc = subprocess.Popen([TGAPI_BIN, "--local", f"--api-id={api_id}", f"--api-hash={api_hash}",
                              "--http-port=8081", f"--dir={work}", f"--temp-dir={work}/tmp"],
                             stdout=logf, stderr=logf)
     for _ in range(60):
@@ -3234,6 +3295,7 @@ def main():
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("localapi", cmd_localapi))
+    app.add_handler(CommandHandler("buildlocal", cmd_buildlocal))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
