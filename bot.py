@@ -2151,17 +2151,17 @@ async def style_preview(group: str, font: str, ui: str):
     if key in _STYLE_PREVIEW_CACHE:
         return _STYLE_PREVIEW_CACHE[key]
     sample = "السلام عليكم" if group == "ar" else "Hello world"
-    cols, cw, ch = 2, 360, 96
+    cols, cw, ch = 2, 450, 130
     rows = (len(STYLES) + cols - 1) // cols
     width, height = cols * cw, rows * ch
-    size = round(34 * font_scale(font, group))
+    size = round(54 * font_scale(font, group))
     label_font = "Noto Naskh Arabic" if ui == "ar" else "Noto Sans"
     styles, events = [], []
     for i, key_s in enumerate(STYLES):
         cx, cy = (i % cols) * cw, (i // cols) * ch
         styles.append(_ass_style_line(f"S{i}", font, size, STYLE_DEFS[key_s]))
-        events.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + ch // 2 + 8})}}{sample}")
-        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,Lbl,,0,0,0,,{{\\an7\\pos({cx + 8},{cy + 4})\\fn{label_font}\\fs15}}{T(ui, 'style_' + key_s)}")
+        events.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + ch // 2 + 22})}}{sample}")
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,Lbl,,0,0,0,,{{\\an7\\pos({cx + 12},{cy + 6})\\fn{label_font}\\b1\\fs28}}{T(ui, 'style_' + key_s)}")
     ass = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\n\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
@@ -2196,15 +2196,17 @@ async def font_preview(group: str):
     if group in _PREVIEW_CACHE:
         return _PREVIEW_CACHE[group]
     fonts = list(FONTS_AR if group == "ar" else FONTS_LAT)
-    sample = "السلام عليكم ورحمة الله ١٢٣" if group == "ar" else "Hello world 123 - Aa Bb Cc"
-    row_h, width = 64, 720
+    sample = "السلام عليكم ١٢٣" if group == "ar" else "Hello world 123"
+    row_h, width = 130, 720
     height = row_h * len(fonts) + 16
     events = []
     for i, name in enumerate(fonts):
-        y = 8 + row_h * i + row_h // 2
-        size = round(30 * 1.2 * font_scale(name, group))
-        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,L,,0,0,0,,{{\\an4\\pos(16,{y})\\fnNoto Sans\\fs20\\1c&H00B0B0B0&}}{i + 1}. {name}")
-        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,S,,0,0,0,,{{\\an6\\pos({width - 16},{y})\\fn{name}\\fs{size}}}{sample}")
+        y0 = 8 + row_h * i
+        size = round(56 * font_scale(name, group))
+        if i:   # thin separator between rows
+            events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,L,,0,0,0,,{{\\an7\\pos(0,{y0})\\p1\\bord0\\1c&H00444444&}}m 0 0 l {width} 0 l {width} 2 l 0 2{{\\p0}}")
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,L,,0,0,0,,{{\\an7\\pos(20,{y0 + 8})\\fnNoto Sans\\b1\\fs32\\1c&H0050D0FF&}}{i + 1}. {name}")
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,S,,0,0,0,,{{\\an5\\pos({width // 2},{y0 + 84})\\fn{name}\\fs{size}}}{sample}")
     ass = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\n\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
