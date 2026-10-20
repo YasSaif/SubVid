@@ -513,6 +513,32 @@ _LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", 
 _llm_bad: dict = {}   # model -> time until which it is skipped
 
 
+def _rate_wait(text: str) -> float:
+    """Seconds Groq asks us to wait ("Please try again in 7.2s" / "in 350ms" / "in 1m3s"), 0 if unknown."""
+    m = re.search(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)(ms|s)", text or "")
+    if not m:
+        return 0.0
+    mins = float(m.group(1) or 0)
+    val = float(m.group(2)) / (1000 if m.group(3) == "ms" else 1)
+    return mins * 60 + val
+
+
+def _groq_chat(body: dict, timeout: int) -> dict:
+    """POST to Groq; on a rate limit that clears within ~25 s, wait and retry once instead of giving up."""
+    for attempt in range(2):
+        r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
+                       headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=timeout)
+        if r.status_code == 429 and attempt == 0:
+            w = _rate_wait(r.text)
+            if 0 < w <= 25:
+                log.info("Groq rate limit, waiting %.1fs", w)
+                time.sleep(w + 0.5)
+                continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+
 def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
@@ -544,11 +570,7 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
         if model.startswith("openai/gpt-oss"):
             body["reasoning_effort"] = "low"
         try:
-            r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=60)
-            if r.status_code >= 400:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-            out = json.loads(r.json()["choices"][0]["message"]["content"])["t"]
+            out = json.loads(_groq_chat(body, 60)["choices"][0]["message"]["content"])["t"]
             if not isinstance(out, list) or len(out) != len(texts):
                 raise ValueError("line count mismatch")
             log.info("LLM used: %s", model)
@@ -573,11 +595,7 @@ def _llm_json(system: str, payload: dict, timeout: int = 60) -> dict:
         if model.startswith("openai/gpt-oss"):
             body["reasoning_effort"] = "low"
         try:
-            r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
-                           headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=timeout)
-            if r.status_code >= 400:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-            return json.loads(r.json()["choices"][0]["message"]["content"])
+            return json.loads(_groq_chat(body, timeout)["choices"][0]["message"]["content"])
         except Exception as e:
             last = e
             log.warning("Groq LLM %s failed: %s", model, str(e)[:200])
@@ -658,17 +676,20 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=No
     names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
     src_name, tgt_name = names.get(src, src), names.get(tgt, tgt)
     texts = [" ".join(t.split()) for _, _, t in segments]
+    def run(batch):
+        """A batch that fails (wrong line count, bad JSON) is split in two and retried: small batches rarely fail."""
+        try:
+            return _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "", gloss=gloss)
+        except Exception:
+            if len(batch) <= 3:
+                raise
+            time.sleep(1)
+            mid = len(batch) // 2
+            return run(batch[:mid]) + run(batch[mid:])
+
     result = []
     for i in range(0, len(texts), 30):
-        batch = texts[i:i + 30]
-        for attempt in range(2):
-            try:
-                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "", gloss=gloss)
-                break
-            except Exception:
-                if attempt == 1:
-                    raise
-                time.sleep(2)
+        result += run(texts[i:i + 30])
     return [(s, e, r or t) for (s, e, _), r, t in zip(segments, result, texts)]
 
 
@@ -911,18 +932,22 @@ async def probe(video: Path):
     return w, h, duration
 
 
-def out_size(w: int, h: int):
-    """Size of the burned video: short side = MAX_RES (same rule burn_subtitles uses)."""
+LONG_CLIP_SEC = int(os.environ.get("LONG_CLIP_SEC", "300"))   # clips longer than this are burned at 360p (about 2x faster)
+
+
+def out_size(w: int, h: int, duration: float = 0.0):
+    """Size of the burned video: short side = MAX_RES, or 360 for long clips (same rule burn_subtitles uses)."""
+    res = MAX_RES if duration <= LONG_CLIP_SEC else min(MAX_RES, 360)
     short = min(w, h)
-    if short and short != MAX_RES:
-        f = MAX_RES / short
+    if short and short != res:
+        f = res / short
         return int(w * f) // 2 * 2, int(h * f) // 2 * 2
     return w // 2 * 2, h // 2 * 2
 
 
-def chars_per_line(w: int, h: int, job: dict) -> int:
+def chars_per_line(w: int, h: int, job: dict, duration: float = 0.0) -> int:
     """How many characters of the chosen font fit on one subtitle line, so lines never overflow the frame."""
-    ow, oh = out_size(w, h)
+    ow, oh = out_size(w, h, duration)
     if not (ow and oh):
         return 28
     tgt = job["tgt"]
@@ -953,7 +978,7 @@ async def src_fps(video: Path) -> float:
 
 async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict,
                          duration: float = 0.0, on_frac=None) -> Path:
-    w, h = out_size(w, h)
+    w, h = out_size(w, h, duration)
     scale = f"scale={w}:{h},setsar=1," if w and h else ""   # exact size + square pixels = same shape as the original
     portrait = h > w
 
@@ -1012,11 +1037,17 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
               f"scale={w}:{h}:flags=area")
     else:
         vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
+    # keep the file under Telegram's bot upload limit: cap the video bitrate by what fits in ~44MB for this duration
+    rate = []
+    if duration > 0:
+        kbps = int((44 * 8 * 1024) / duration - 64)
+        kbps = max(250, min(2500, kbps))
+        rate = ["-maxrate", f"{kbps}k", "-bufsize", f"{kbps * 2}k"]
     await run_ffmpeg(
         [
             "ffmpeg", "-y", "-v", "verbose", "-threads", "1", "-filter_threads", "1", "-i", str(video), "-vf", vf,
-            "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", "29", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k", "-threads", "1", "-movflags", "+faststart", str(out),
+            "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", "29", *rate, "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "64k", "-threads", "1", "-movflags", "+faststart", str(out),
         ],
         cwd=str(workdir),
         timeout=1500,
@@ -1766,7 +1797,7 @@ async def apply_edit(msg, ui, text: str):
     if not edits:
         await msg.reply_text(T(ui, "send_media"))
         return
-    max_chars = chars_per_line(st["w"], st["h"], st["job"])
+    max_chars = chars_per_line(st["w"], st["h"], st["job"], st["duration"])
     if all(a is not None for a, _, _ in edits):          # full SRT with its own timing
         cues = []
         for a, b, t in edits:
@@ -1814,7 +1845,7 @@ async def reburn(bot, chat_id, jid, cues, status):
                                    "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(thumb)], timeout=60)
                 except Exception:
                     thumb = None
-                ow, oh = out_size(st["w"], st["h"])
+                ow, oh = out_size(st["w"], st["h"], st["duration"])
                 with open(out, "rb") as f:
                     tf = open(thumb, "rb") if thumb and thumb.exists() else None
                     try:
@@ -2025,7 +2056,7 @@ async def process(bot, chat_id: int, job: dict, status):
 
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
-            max_chars = chars_per_line(w, h, job) if mode == "sub" else 40
+            max_chars = chars_per_line(w, h, job, duration) if mode == "sub" else 40
             cues = fix_overlaps(make_cues(segments, max_chars, origs))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
@@ -2067,7 +2098,7 @@ async def process(bot, chat_id: int, job: dict, status):
                                        "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(thumb)], timeout=60)
                     except Exception:
                         thumb = None
-                    ow, oh = out_size(w, h)
+                    ow, oh = out_size(w, h, duration)
                     with open(out, "rb") as f:
                         tf = open(thumb, "rb") if thumb and thumb.exists() else None
                         try:
