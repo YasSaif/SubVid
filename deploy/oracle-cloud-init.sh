@@ -35,11 +35,15 @@ MAX_MINUTES=10
 EOF
 chmod 600 /opt/subvid.env
 
-# nightly auto-update from GitHub + start on boot
+# The container runs the code from /opt/subvid and pulls the newest version from GitHub every time it starts.
+# So: /update in Telegram = restart = new code. Nightly the image is rebuilt too (in case libraries changed).
 cat > /usr/local/bin/subvid-update <<'EOF'
 #!/bin/bash
-cd /opt/subvid && git pull -q && docker build -q -t subvid . && docker rm -f subvid >/dev/null 2>&1
-docker run -d --name subvid --restart always --env-file /opt/subvid.env subvid
+cd /opt/subvid && git pull -q
+docker build -q -t subvid . >/dev/null
+docker rm -f subvid >/dev/null 2>&1
+docker run -d --name subvid --restart always --env-file /opt/subvid.env -v /opt/subvid:/app subvid \
+  sh -c "git -C /app pull -q || true; exec python /app/bot.py"
 EOF
 chmod +x /usr/local/bin/subvid-update
 /usr/local/bin/subvid-update

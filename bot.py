@@ -7,6 +7,7 @@ Pipeline: download -> audio (ffmpeg) -> transcribe (faster-whisper)
 """
 import asyncio
 import base64
+import collections
 import gc
 import json
 import logging
@@ -73,6 +74,24 @@ logging.basicConfig(
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("subvid")
+
+
+class _RingLog(logging.Handler):
+    """Keeps the last log lines in memory so the admin can get them with /logs (no server access needed)."""
+    def __init__(self):
+        super().__init__()
+        self.lines = collections.deque(maxlen=400)
+
+    def emit(self, record):
+        try:
+            self.lines.append(self.format(record)[:600])
+        except Exception:
+            pass
+
+
+RING = _RingLog()
+RING.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(RING)
 
 URL_RE = re.compile(r"https?://\S+")
 JOB_SEM = asyncio.Semaphore(int(os.environ.get("JOB_CONCURRENCY", "1")))  # one heavy job at a time (protects RAM/CPU)
@@ -2962,6 +2981,25 @@ async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"❌ تعذّر الحفظ: {str(e)[:150]}")
 
 
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: the last log lines as a file."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    text = "\n".join(RING.lines) or "(empty)"
+    await update.effective_message.reply_document(document=text.encode("utf-8"), filename="subvid-log.txt")
+
+
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: restart the bot; on the own server the container pulls the newest code from GitHub on start."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    if ACTIVE:
+        await update.effective_message.reply_text("⏳ فيه معالجة شغّالة الآن. أعد /update بعد ما تنتهي.")
+        return
+    await update.effective_message.reply_text("🔄 جاري التحديث... يرجع البوت خلال نحو 30 ثانية.")
+    asyncio.get_running_loop().call_later(1.5, lambda: os._exit(0))
+
+
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
         return
@@ -3052,6 +3090,8 @@ def main():
     app.add_handler(CommandHandler("fonttest", cmd_fonttest))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
