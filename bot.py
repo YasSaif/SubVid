@@ -50,8 +50,11 @@ USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (save
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
+SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "2"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
-GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
+GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
+GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
+GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
 GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
 TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
@@ -107,7 +110,7 @@ if os.environ.get("ENABLE_KUFI") != "1":   # Kufi renders as empty boxes in burn
 FONTS_LAT = ["Noto Sans", "Noto Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
-SIZES = [("size_s", 0.8), ("size_m", 1.0), ("size_l", 1.3)]
+SIZES = [("size_s", 0.85), ("size_m", 1.2), ("size_l", 1.65)]
 STYLES = ["classic", "box", "yellow"]
 STYLE_DEFS = {  # ASS colours are &HAABBGGRR (AA=00 opaque, FF transparent)
     "classic": "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0",
@@ -266,19 +269,31 @@ def get_model() -> WhisperModel:
 
 
 def transcribe_groq(audio_path: str, language=None):
-    with open(audio_path, "rb") as f:
-        data = {"model": GROQ_ASR_MODEL, "response_format": "verbose_json", "temperature": "0"}
-        if language:
-            data["language"] = language
-        r = httpx.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            data=data, files={"file": ("audio.wav", f, "audio/wav")}, timeout=120,
-        )
-    r.raise_for_status()
+    last = None
+    for model in (GROQ_ASR_MODEL, GROQ_ASR_FALLBACK):
+        try:
+            with open(audio_path, "rb") as f:
+                data = {"model": model, "response_format": "verbose_json", "temperature": "0"}
+                if language:
+                    data["language"] = language
+                if GROQ_PROMPT:
+                    data["prompt"] = GROQ_PROMPT[:800]
+                r = httpx.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    data=data, files={"file": ("audio.flac", f, "audio/flac")}, timeout=120,
+                )
+            r.raise_for_status()
+            break
+        except Exception as e:
+            last = e
+            log.warning("Groq ASR %s failed: %s", model, str(e)[:120])
+    else:
+        raise last
     d = r.json()
     out = [(float(x["start"]), float(x["end"]), x["text"].strip())
-           for x in d.get("segments", []) if x.get("text", "").strip()]
+           for x in d.get("segments", []) if x.get("text", "").strip()
+           and float(x.get("no_speech_prob", 0)) < 0.8]
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
     return out, lang
 
@@ -624,7 +639,7 @@ async def probe(video: Path):
 async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict) -> Path:
     scale = ""
     short_side = min(w, h)
-    if short_side > MAX_RES:  # keep the file small and the encode fast
+    if short_side and short_side != MAX_RES:  # fixed output size: small sources are upscaled so the text stays sharp
         f = MAX_RES / short_side
         w, h = int(w * f) // 2 * 2, int(h * f) // 2 * 2
         scale = f"scale={w}:{h},"
@@ -635,7 +650,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     log.info("burn: font=%s size=x%s style=%s pos=%s res=%sx%s", font, SIZES[job["size_i"]][1],
              STYLES[job["style_i"]], POSITIONS[job["pos_i"]][0], w, h)
     mult = SIZES[job["size_i"]][1]
-    base = 9 if portrait else 14  # relative to a 288px-high canvas
+    base = 12 if portrait else 17  # relative to a 288px-high canvas
     font_size = max(6, round(base * mult))
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
@@ -646,13 +661,29 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     else:
         margin_v = 0
 
+    # force_style's Alignment uses the legacy SSA numbering (5 = top-left!), so the position is set
+    # with an \anN tag on every cue instead, which always uses the numpad layout.
     style = (
         f"FontName={font},Bold=1,FontSize={font_size},{STYLE_DEFS[style_key]},"
-        f"Alignment={align},MarginV={margin_v},MarginL=20,MarginR=20"
+        f"Alignment=2,MarginV={margin_v},MarginL=20,MarginR=20"
     )
+    src_srt = (workdir / srt_name).read_text(encoding="utf-8")
+    tagged = []
+    for block in src_srt.strip().split("\n\n"):
+        lines = block.split("\n")
+        if len(lines) >= 3:
+            lines[2] = "{\\an%d}" % align + lines[2]
+        tagged.append("\n".join(lines))
+    srt_name = "subs_burn.srt"
+    (workdir / srt_name).write_text("\n\n".join(tagged) + "\n", encoding="utf-8")
     out = workdir / "output.mp4"
     # srt is referenced by relative name and ffmpeg runs inside workdir -> no path escaping issues
-    vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
+    w, h = w // 2 * 2, h // 2 * 2
+    if SS > 1:
+        vf = (f"{scale}scale={w * SS}:{h * SS}:flags=bicubic,subtitles={srt_name}:force_style='{style}',"
+              f"scale={w}:{h}:flags=area")
+    else:
+        vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
     await run_cmd(
         [
             "ffmpeg", "-y", "-v", "verbose", "-threads", "1", "-filter_threads", "1", "-i", str(video), "-vf", vf,
@@ -739,9 +770,12 @@ async def process(bot, chat_id: int, job: dict, status):
                 raise UserError("too_long", m=MAX_MINUTES)
 
             await set_status(status, T(ui, "p_audio"))
-            audio = workdir / "audio.wav"
+            # clean the audio (rumble/hiss, uneven volume) so recognition doesn't depend on recording quality
+            audio = workdir / "audio.flac"
             await run_cmd(
-                ["ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(audio)]
+                ["ffmpeg", "-y", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000",
+                 "-af", "highpass=f=80,lowpass=f=7600,afftdn=nf=-28,dynaudnorm=f=150:g=15",
+                 str(audio)]
             )
             st.mark("audio")
 
@@ -1101,6 +1135,34 @@ async def cmd_fonttest(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Offered in the bot: arabic={FONTS_AR} latin={FONTS_LAT}\n\n"
             "libass font selection:\n" + ("\n".join(lines[:12]) or "(no lines)")
         )
+        # real-pipeline test: tiny portrait frame, SRT + subtitles filter, left = plain, right = supersampled
+        (workdir / "t.srt").write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n{\\an5}السلام عليكم\nالاتصالات والمعلومات\n", encoding="utf-8")
+        pngs = []
+        for fi, fname in enumerate(CANDIDATES_AR):
+            for ss in (1, 2):
+                st = (f"FontName={fname},Bold=1,FontSize=14,{STYLE_DEFS['classic']},Alignment=2,MarginV=0,MarginL=20,MarginR=20")
+                out_png = f"p{fi}_{ss}.png"
+                if ss == 1:
+                    vf = f"subtitles=t.srt:force_style='{st}'"
+                else:
+                    vf = f"scale=512:908,subtitles=t.srt:force_style='{st}',scale=256:454:flags=area"
+                await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                                   "color=c=0x303030:s=256x454:d=2", "-vf", vf, "-frames:v", "1", out_png],
+                                  cwd=str(workdir))
+                if (workdir / out_png).exists():
+                    pngs.append(out_png)
+        if len(pngs) == 2 * len(CANDIDATES_AR):
+            args = ["ffmpeg", "-y", "-v", "error"]
+            for n in pngs:
+                args += ["-i", n]
+            rows = len(pngs) // 2
+            fc = "".join(f"[{2*i}][{2*i+1}]hstack[r{i}];" for i in range(rows))
+            fc += "".join(f"[r{i}]" for i in range(rows)) + f"vstack=inputs={rows}"
+            await run_capture(args + ["-filter_complex", fc, "pipeline.png"], cwd=str(workdir))
+            if (workdir / "pipeline.png").exists():
+                with open(workdir / "pipeline.png", "rb") as f:
+                    await msg.reply_photo(f, caption="Real-pipeline test: left = normal, right = supersampled (rows: " + ", ".join(CANDIDATES_AR) + ")")
         png = workdir / "test.png"
         if png.exists():
             with open(png, "rb") as f:
