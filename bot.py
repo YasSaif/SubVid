@@ -48,11 +48,29 @@ WEBHOOK_URL = (
     or ""
 ).rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def _load_local_api():
+    """Own Telegram Bot API server (no 20MB/50MB limits). Active only if api_id/api_hash were saved AND the binary exists."""
+    try:
+        d = json.loads((BASE_DIR / "localapi.json").read_text(encoding="utf-8"))
+        i, h = str(d["api_id"]).strip(), str(d["api_hash"]).strip()
+        if i.isdigit() and re.fullmatch(r"[0-9a-fA-F]{32}", h) and shutil.which("telegram-bot-api"):
+            return i, h
+    except Exception:
+        pass
+    return None
+
+
+LOCAL_API = _load_local_api()
+LOCAL = LOCAL_API is not None
+FILE_LIMIT_TXT = "2GB" if LOCAL else "20MB"
 MAX_RES = int(os.environ.get("VIDEO_MAX_RES", "1080"))  # max size of the SMALLER video side (480 = 480x854 portrait)
 USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (saves RAM, may add noise text)
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
 DEBUG_TEXT = os.environ.get("DEBUG_TEXT") == "1"
-MAX_MINUTES = int(os.environ.get("CLIP_MAX_MINUTES", "20"))          # burn-in video (slow on the free CPU)
+MAX_MINUTES = int(os.environ.get("CLIP_MAX_MINUTES", "60" if LOCAL else "20"))          # burn-in video (slow on the free CPU)
 MAX_MINUTES_TXT = int(os.environ.get("MAX_MINUTES_TXT", "25"))  # text + SRT only (Groq accepts files up to 25MB)
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
 BURN_THREADS = os.environ.get("BURN_THREADS", "1")   # raise on a bigger server (e.g. 4)
@@ -67,7 +85,7 @@ SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.12"))  # seconds subtitles are 
 GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
 GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")  # llama-3.3-70b gave model_not_found on this account
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
-TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
+TG_UPLOAD_LIMIT = (1900 if LOCAL else 49) * 1024 * 1024  # cloud Bot API upload limit is 50 MB, own server 2000 MB
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
@@ -188,7 +206,7 @@ def fonts_for(tgt: str):
 STR = {
     "ar": {
         "pick_ui": "🌐 اختر لغة الواجهة | Choose the interface language",
-        "welcome": "✅ تم اختيار اللغة.\n\n🎬 ماذا يفعل SubVid Ai؟\n🎙 يستخرج الكلام من الفيديو بدقة (أي لغة)\n🌍 يترجمه إلى لغتك مع مراجعة تلقائية للأخطاء\n🎞 يدمج الترجمة على الفيديو كما في الأفلام، بالخط والحجم والنمط والمكان الذي تختاره\n🌐 ترجمة ثنائية اللغة (لغتين معًا) إذا حبيت\n📝 أو يعطيك النص مع ملف SRT لتعدّله ثم يعيد دمجه\n\n📥 ما المدعوم؟\n• رابط تيك توك\n• رابط فيديو مباشر\n• ملف فيديو من جوالك (حتى 20MB)\n• يوتيوب غير مدعوم حاليًا، أرسل الفيديو كملف\n\n⏱ أقصى مدة للمقطع: " + str(MAX_MINUTES) + " دقائق\n\n▶️ ابدأ الآن: أرسل الرابط أو الفيديو.\n\n🔒 الخصوصية: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة: /language",
+        "welcome": "✅ تم اختيار اللغة.\n\n🎬 ماذا يفعل SubVid Ai؟\n🎙 يستخرج الكلام من الفيديو بدقة (أي لغة)\n🌍 يترجمه إلى لغتك مع مراجعة تلقائية للأخطاء\n🎞 يدمج الترجمة على الفيديو كما في الأفلام، بالخط والحجم والنمط والمكان الذي تختاره\n🌐 ترجمة ثنائية اللغة (لغتين معًا) إذا حبيت\n📝 أو يعطيك النص مع ملف SRT لتعدّله ثم يعيد دمجه\n\n📥 ما المدعوم؟\n• رابط تيك توك\n• رابط فيديو مباشر\n• ملف فيديو من جوالك (حتى " + FILE_LIMIT_TXT + ")\n• يوتيوب غير مدعوم حاليًا، أرسل الفيديو كملف\n\n⏱ أقصى مدة للمقطع: " + str(MAX_MINUTES) + " دقائق\n\n▶️ ابدأ الآن: أرسل الرابط أو الفيديو.\n\n🔒 الخصوصية: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة: /language",
         "send_media": "أرسل رابط فيديو أو ملف فيديو.",
         "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
         "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
@@ -256,7 +274,7 @@ STR = {
     },
     "en": {
         "pick_ui": "🌐 اختر لغة الواجهة | Choose the interface language",
-        "welcome": "✅ Language set.\n\n🎬 What does SubVid Ai do?\n🎙 Transcribes the speech in your video accurately (any language)\n🌍 Translates it into your language with an automatic error review\n🎞 Burns the subtitles onto the video just like in movies, with the font, size, style and position you choose\n🌐 Bilingual subtitles (two languages together) if you like\n📝 Or gives you the text plus an SRT file to edit and burn again\n\n📥 What is supported?\n• TikTok links\n• Direct video links\n• A video file from your phone (up to 20MB)\n• YouTube is not supported right now; send the video as a file\n\n⏱ Maximum clip length: " + str(MAX_MINUTES) + " minutes\n\n▶️ Start now: send the link or the video.\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
+        "welcome": "✅ Language set.\n\n🎬 What does SubVid Ai do?\n🎙 Transcribes the speech in your video accurately (any language)\n🌍 Translates it into your language with an automatic error review\n🎞 Burns the subtitles onto the video just like in movies, with the font, size, style and position you choose\n🌐 Bilingual subtitles (two languages together) if you like\n📝 Or gives you the text plus an SRT file to edit and burn again\n\n📥 What is supported?\n• TikTok links\n• Direct video links\n• A video file from your phone (up to " + FILE_LIMIT_TXT + ")\n• YouTube is not supported right now; send the video as a file\n\n⏱ Maximum clip length: " + str(MAX_MINUTES) + " minutes\n\n▶️ Start now: send the link or the video.\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
         "send_media": "Send a video link or a video file.",
         "src_q": "🔍 How should we find the spoken language in the clip?",
         "src_note": "ℹ️ Auto-detect may take a little longer; choosing the language manually is usually faster and more accurate.",
@@ -955,14 +973,14 @@ async def probe(video: Path):
 
 
 
-UPLOAD_MB = 44   # Telegram bots can upload up to 50MB; stay under it
+UPLOAD_MB = 300 if LOCAL else 44   # cloud Bot API: 50MB limit; own server: much larger, but keep files sensible
 
 
 def video_kbps(duration: float) -> int:
     """Video bitrate that keeps the burned file under UPLOAD_MB for this duration."""
     if duration <= 0:
         return 5000
-    return max(250, min(5000, int(UPLOAD_MB * 8 * 1024 / duration - 64)))
+    return max(250, min(4000 if LOCAL else 5000, int(UPLOAD_MB * 8 * 1024 / duration - 64)))
 
 
 def target_res(duration: float) -> int:
@@ -1146,6 +1164,11 @@ async def fetch_input(bot, kind: str, data: str, workdir: Path, audio_only: bool
     try:
         tg_file = await bot.get_file(data)
         await tg_file.download_to_drive(dest)
+        if LOCAL and tg_file.file_path and os.path.isabs(tg_file.file_path):
+            try:
+                os.remove(tg_file.file_path)   # the own server keeps its copy otherwise
+            except OSError:
+                pass
     except BadRequest as e:
         if "too big" in str(e).lower():
             raise UserError("file_big")
@@ -3023,6 +3046,25 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_document(document=text.encode("utf-8"), filename="subvid-log.txt")
 
 
+async def cmd_localapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: /localapi <api_id> <api_hash> saves the keys of my.telegram.org for the own Bot API server."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    args = context.args or []
+    ok = len(args) == 2 and args[0].isdigit() and re.fullmatch(r"[0-9a-fA-F]{32}", args[1])
+    try:
+        await msg.delete()   # keep the hash out of the chat history
+    except TelegramError:
+        pass
+    if not ok:
+        await context.bot.send_message(msg.chat_id, "الصيغة: /localapi api_id api_hash\n(الـapi_id أرقام، والـapi_hash 32 حرفًا)")
+        return
+    (BASE_DIR / "localapi.json").write_text(json.dumps({"api_id": args[0], "api_hash": args[1]}), encoding="utf-8")
+    state = "مفعّل الآن" if LOCAL else "سيتفعّل بعد إعادة بناء السيرفر (تلقائيًا في الليل)"
+    await context.bot.send_message(msg.chat_id, f"✅ تم حفظ المفاتيح، وحذفت رسالتك. السيرفر المحلي: {state}.")
+
+
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin only: restart the bot; on the own server the container pulls the newest code from GitHub on start."""
     if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
@@ -3107,10 +3149,70 @@ async def post_init(app: Application):
 
 
 # -------------------------------------------------------------------- main
+def _port_open(port: int) -> bool:
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def start_local_api() -> bool:
+    """Starts our own telegram-bot-api server. On the first start it moves the bot from Telegram's cloud server to it."""
+    import subprocess
+    api_id, api_hash = LOCAL_API
+    work = Path(tempfile.gettempdir()) / "tgapi"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    logf = open(work.parent / "tgapi.log", "ab")
+    proc = subprocess.Popen(["telegram-bot-api", "--local", f"--api-id={api_id}", f"--api-hash={api_hash}",
+                             "--http-port=8081", f"--dir={work}", f"--temp-dir={work}/tmp"],
+                            stdout=logf, stderr=logf)
+    for _ in range(60):
+        if proc.poll() is not None:
+            log.error("telegram-bot-api exited with code %s", proc.returncode)
+            return False
+        if _port_open(8081):
+            break
+        time.sleep(1)
+    else:
+        proc.kill()
+        return False
+    flag = BASE_DIR / ".switched_to_local"
+    if not flag.exists():   # the bot may only live on one server: log out of the cloud one first (Telegram then asks to wait 10 min)
+        base = f"https://api.telegram.org/bot{TOKEN}"
+        try:
+            if ADMIN_ID:
+                httpx.post(f"{base}/sendMessage", data={"chat_id": ADMIN_ID, "text": "SubVid: switching to the own Bot API server. The bot will be offline for about 11 minutes, once."}, timeout=20)
+            r = httpx.post(f"{base}/logOut", timeout=30)
+            log.info("cloud logOut: %s", r.text[:100])
+        except Exception as e:
+            log.warning("cloud logOut failed: %s", e)
+        flag.write_text("1")
+        log.info("waiting 11 minutes before logging in on the own server")
+        time.sleep(660)
+
+    def _watch():   # if the local server ever dies, restart the whole container so it comes back
+        proc.wait()
+        log.error("telegram-bot-api stopped, restarting")
+        os._exit(1)
+    threading.Thread(target=_watch, daemon=True).start()
+    return True
+
+
 def main():
+    global LOCAL, TG_UPLOAD_LIMIT, UPLOAD_MB
+    if LOCAL and not start_local_api():
+        log.error("own Bot API server failed to start; using Telegram's cloud server")
+        LOCAL = False
+        TG_UPLOAD_LIMIT = 49 * 1024 * 1024
+        UPLOAD_MB = 44
+    builder = ApplicationBuilder().token(TOKEN)
+    if LOCAL:
+        builder = builder.base_url("http://127.0.0.1:8081/bot").base_file_url("http://127.0.0.1:8081/file/bot").local_mode(True)
     app = (
-        ApplicationBuilder()
-        .token(TOKEN)
+        builder
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .concurrent_updates(True)
@@ -3126,6 +3228,7 @@ def main():
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("localapi", cmd_localapi))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
