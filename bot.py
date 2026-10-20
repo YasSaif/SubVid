@@ -54,6 +54,7 @@ DEBUG_TEXT = os.environ.get("DEBUG_TEXT") == "1"
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))          # burn-in video (slow on the free CPU)
 MAX_MINUTES_TXT = int(os.environ.get("MAX_MINUTES_TXT", "25"))  # text + SRT only (Groq accepts files up to 25MB)
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
+BURN_THREADS = os.environ.get("BURN_THREADS", "1")   # raise on a bigger server (e.g. 4)
 BURN_PRESET = os.environ.get("BURN_PRESET", "ultrafast")  # ultrafast = fastest encode (slightly bigger file)
 SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "1"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)   # your Telegram numeric id (send /id to the bot); receives error alerts
@@ -74,7 +75,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("subvid")
 
 URL_RE = re.compile(r"https?://\S+")
-JOB_SEM = asyncio.Semaphore(1)  # one heavy job at a time (protects RAM/CPU)
+JOB_SEM = asyncio.Semaphore(int(os.environ.get("JOB_CONCURRENCY", "1")))  # one heavy job at a time (protects RAM/CPU)
 JOBS: "OrderedDict[str, dict]" = OrderedDict()  # key -> job settings
 PENDING: list = []  # ids of jobs that are running or waiting (for queue position)
 
@@ -1045,9 +1046,9 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
         rate = ["-maxrate", f"{kbps}k", "-bufsize", f"{kbps * 2}k"]
     await run_ffmpeg(
         [
-            "ffmpeg", "-y", "-v", "verbose", "-threads", "1", "-filter_threads", "1", "-i", str(video), "-vf", vf,
+            "ffmpeg", "-y", "-v", "verbose", "-threads", BURN_THREADS, "-filter_threads", BURN_THREADS, "-i", str(video), "-vf", vf,
             "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", "29", *rate, "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "64k", "-threads", "1", "-movflags", "+faststart", str(out),
+            "-c:a", "aac", "-b:a", "64k", "-threads", BURN_THREADS, "-movflags", "+faststart", str(out),
         ],
         cwd=str(workdir),
         timeout=1500,
@@ -3077,8 +3078,9 @@ def main():
             drop_pending_updates=True,
             allowed_updates=Update.ALL_TYPES,
         )
-    else:  # local testing
-        app.run_polling(drop_pending_updates=True)
+    else:  # no public URL (own server / local): long polling, nothing needs to be exposed
+        load_prefs()
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
