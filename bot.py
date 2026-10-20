@@ -6,6 +6,7 @@ Pipeline: download -> audio (ffmpeg) -> transcribe (faster-whisper)
           -> translate (Google API / gtx / MyMemory) -> clean + wrap -> burn or send text.
 """
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -94,6 +95,8 @@ def ordered(codes, first):
 # ----------------------------------------------------------------- styles
 FONTS_AR = ["Noto Sans Arabic", "Noto Naskh Arabic", "Noto Kufi Arabic", "Amiri"]
 FONTS_LAT = ["Noto Sans", "Noto Serif"]
+CANDIDATES_AR = list(FONTS_AR)   # everything we would like to offer
+CANDIDATES_LAT = list(FONTS_LAT)
 SIZES = [("size_s", 0.8), ("size_m", 1.0), ("size_l", 1.3)]
 STYLES = ["classic", "box", "yellow"]
 STYLE_DEFS = {  # ASS colours are &HAABBGGRR (AA=00 opaque, FF transparent)
@@ -203,6 +206,24 @@ def T(ui: str, key: str, **kw) -> str:
 
 
 # ----------------------------------------------------------------- timing
+def _read_mb(paths):
+    for p in paths:
+        try:
+            with open(p) as f:
+                return f"{int(f.read().strip()) / 1048576:.0f}MB"
+        except Exception:
+            continue
+    return "n/a"
+
+
+def mem_now() -> str:
+    return _read_mb(("/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"))
+
+
+def mem_peak() -> str:
+    return _read_mb(("/sys/fs/cgroup/memory.peak", "/sys/fs/cgroup/memory/memory.max_usage_in_bytes"))
+
+
 class Stages:
     def __init__(self):
         self.reset()
@@ -213,11 +234,11 @@ class Stages:
 
     def mark(self, name: str):
         now = time.monotonic()
-        self.items.append(f"{name}={now - self.t:.1f}s")
+        self.items.append(f"{name}={now - self.t:.1f}s@{mem_now()}")
         self.t = now
 
     def summary(self) -> str:
-        return " ".join(self.items) + f" total={time.monotonic() - self.t0:.1f}s"
+        return " ".join(self.items) + f" total={time.monotonic() - self.t0:.1f}s peak={mem_peak()}"
 
 
 # ---------------------------------------------------------------- whisper
@@ -230,7 +251,7 @@ def get_model() -> WhisperModel:
     with _model_lock:
         if _model is None:
             log.info("Loading Whisper model: %s", WHISPER_MODEL)
-            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=2, num_workers=1)
         return _model
 
 
@@ -429,7 +450,7 @@ def build_srt(cues) -> str:
 
 
 # ----------------------------------------------------------------- ffmpeg
-async def run_cmd(args, cwd=None, timeout=900) -> bytes:
+async def run_cmd(args, cwd=None, timeout=900, grep=()) -> bytes:
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=cwd,
@@ -444,6 +465,13 @@ async def run_cmd(args, cwd=None, timeout=900) -> bytes:
     if proc.returncode != 0:
         tail = err.decode(errors="ignore")[-1000:]
         raise RuntimeError(f"{args[0]} exited {proc.returncode}: {tail}")
+    if grep:
+        seen = []
+        for line in err.decode(errors="ignore").splitlines():
+            if any(g in line for g in grep) and line not in seen:
+                seen.append(line)
+        for line in seen[:15]:
+            log.info("ffmpeg: %s", line[:220])
     return out
 
 
@@ -503,12 +531,13 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
     await run_cmd(
         [
-            "ffmpeg", "-y", "-i", str(video), "-vf", vf,
+            "ffmpeg", "-y", "-v", "verbose", "-threads", "1", "-filter_threads", "1", "-i", str(video), "-vf", vf,
             "-c:v", "libx264", "-preset", "superfast", "-crf", "28", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out),
+            "-c:a", "aac", "-b:a", "96k", "-threads", "1", "-movflags", "+faststart", str(out),
         ],
         cwd=str(workdir),
         timeout=1500,
+        grep=("fontselect", "Glyph"),
     )
     return out
 
@@ -657,6 +686,7 @@ async def process(bot, chat_id: int, job: dict, status):
         if job["id"] in PENDING:
             PENDING.remove(job["id"])
         shutil.rmtree(workdir, ignore_errors=True)
+        gc.collect()
 
 
 # ---------------------------------------------------------------- screens
@@ -880,15 +910,108 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await begin(context, q, job)
 
 
+async def run_capture(args, cwd=None, timeout=60):
+    """Run a command and return (returncode, stdout, stderr) without raising."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        return proc.returncode, out, err
+    except asyncio.TimeoutError:
+        return -1, b"", b"timeout"
+    except Exception as e:  # e.g. command not found
+        return -1, b"", str(e).encode()
+
+
+FONT_TEST_AR = "مرحبا بالعالم - السلام عليكم"
+
+
+async def cmd_fonttest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Renders a sample of every subtitle font exactly as the server's ffmpeg/libass sees it."""
+    msg = update.effective_message
+    await msg.reply_text("🔎 Checking the server fonts...")
+    workdir = Path(tempfile.mkdtemp(prefix="fonttest_"))
+    try:
+        names = CANDIDATES_AR + CANDIDATES_LAT
+        styles, events = [], []
+        for i, name in enumerate(names):
+            styles.append(
+                f"Style: f{i},{name},26,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
+                "1,0,0,0,100,100,0,0,1,2,0,8,10,10,10,1"
+            )
+            sample = FONT_TEST_AR if name in CANDIDATES_AR else "Hello world 123"
+            events.append(
+                f"Dialogue: 0,0:00:00.00,0:00:02.00,f{i},,0,0,{15 + i * 55},,{name}: {sample}"
+            )
+        ass = (
+            "[Script Info]\nScriptType: v4.00+\nPlayResX: 640\nPlayResY: 420\n\n"
+            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+            "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            + "\n".join(styles)
+            + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            + "\n".join(events) + "\n"
+        )
+        (workdir / "test.ass").write_text(ass, encoding="utf-8")
+        rc, _, err = await run_capture(
+            ["ffmpeg", "-y", "-v", "verbose", "-f", "lavfi", "-i", "color=c=black:s=640x420:d=1",
+             "-vf", "ass=test.ass", "-frames:v", "1", "test.png"],
+            cwd=str(workdir),
+        )
+        _, fl, _ = await run_capture(["fc-list", ":lang=ar", "family"])
+        fams = sorted({f.split(",")[0].strip() for f in fl.decode(errors="ignore").splitlines() if f.strip()})
+        lines = []
+        for l in err.decode(errors="ignore").splitlines():
+            if ("fontselect" in l or "Glyph" in l) and l.strip()[:160] not in lines:
+                lines.append(l.strip()[:160])
+        info = (
+            f"ffmpeg exit code: {rc}\n"
+            f"Fonts with Arabic support (fc-list): {', '.join(fams[:25]) or 'NONE'}\n"
+            f"Offered in the bot: arabic={FONTS_AR} latin={FONTS_LAT}\n\n"
+            "libass font selection:\n" + ("\n".join(lines[:12]) or "(no lines)")
+        )
+        png = workdir / "test.png"
+        if png.exists():
+            with open(png, "rb") as f:
+                await msg.reply_photo(f, caption="Each line should show the font name + a sample")
+        else:
+            info += "\n\nno image produced:\n" + err.decode(errors="ignore")[-600:]
+        await msg.reply_text(info[:3500])
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("handler error", exc_info=context.error)
+
+
+async def filter_fonts():
+    """Keep only fonts that are really installed, so we never offer one that renders as boxes."""
+    rc, out, _ = await run_capture(["fc-list", ":", "family"])
+    if rc != 0 or not out.strip():
+        log.warning("fc-list failed; keeping all font options")
+        return
+    have = set()
+    for line in out.decode(errors="ignore").splitlines():
+        for fam in line.split(","):
+            have.add(fam.strip().lower())
+    for lst in (FONTS_AR, FONTS_LAT):
+        keep = [f for f in lst if f.lower() in have]
+        if keep:
+            lst[:] = keep
+        else:
+            log.warning("none of %s found by fontconfig; leaving the list unchanged", lst)
+    log.info("fonts offered: arabic=%s latin=%s", FONTS_AR, FONTS_LAT)
 
 
 async def post_init(app: Application):
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             log.critical("%s not found in PATH - deploy with the Dockerfile!", tool)
+    await filter_fonts()
     await asyncio.to_thread(get_model)  # warm up so the first request is fast
+    log.info("startup complete, memory in use: %s", mem_now())
 
 
 # -------------------------------------------------------------------- main
@@ -905,6 +1028,7 @@ def main():
     )
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("language", cmd_language))
+    app.add_handler(CommandHandler("fonttest", cmd_fonttest))
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
