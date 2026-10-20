@@ -3058,7 +3058,12 @@ async def cmd_localapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except TelegramError:
         pass
     if not ok:
-        await context.bot.send_message(msg.chat_id, "الصيغة: /localapi api_id api_hash\n(الـapi_id أرقام، والـapi_hash 32 حرفًا)")
+        got = " ".join(args)
+        n_id = len(args[0]) if args else 0
+        n_h = len(args[1]) if len(args) > 1 else 0
+        hint = (f"عدد الأجزاء: {len(args)} (المطلوب 2)\nطول الـapi_id: {n_id}، هل كله أرقام: {bool(args) and args[0].isdigit()}\n"
+                f"طول الـapi_hash: {n_h} (المطلوب 32)، هل أحرف وأرقام إنجليزية فقط: {n_h > 0 and bool(re.fullmatch(r'[0-9a-fA-F]+', args[1]))}")
+        await context.bot.send_message(msg.chat_id, "الصيغة: /localapi api_id api_hash\n(مسافة واحدة بينهما، بدون أقواس)\n\n" + hint)
         return
     (BASE_DIR / "localapi.json").write_text(json.dumps({"api_id": args[0], "api_hash": args[1]}), encoding="utf-8")
     state = "مفعّل الآن" if LOCAL else "سيتفعّل بعد إعادة بناء السيرفر (تلقائيًا في الليل)"
