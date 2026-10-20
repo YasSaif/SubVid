@@ -196,13 +196,16 @@ STR = {
         "limit_day": "وصلت حدّك اليومي ({n} مقاطع). جرّب غدًا.", "busy_user": "عندك مقطع قيد المعالجة. انتظر حتى ينتهي ثم أرسل الثاني.",
         "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
         "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
-        "retry": "🔄 إعادة المحاولة", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
+        "retry": "🔄 إعادة المحاولة",
+        "preview": "👁 معاينة شاملة", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
+        "pv_fonts": "الخطوط", "pv_sizes": "الأحجام", "pv_styles": "الأنماط", "pv_pos": "المكان", "pv_bi": "ثنائية اللغة",
+        "pv_bi_note": "تظهر الترجمة وتحتها اللغة الثانية بخط أصغر. للعربية والإنجليزية فقط: إذا كانت الترجمة عربية يضاف الإنجليزي تحتها، وإذا كانت إنجليزية يضاف العربي.", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
         "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
         "tx_mismatch": "عدد المقاطع في النص ({n}) لا يطابق الأصل ({m}). أبقِ نفس الترقيم، أو أرسل SRT بتوقيتك.",
         "caption_edit": "✅ تم تطبيق تعديلاتك.",
-        "bi": "ثنائية اللغة", "on": "مفعّلة", "off": "متوقفة",
+        "bi": "ثنائية اللغة (عربي/إنجليزي)", "on": "مفعّلة", "off": "متوقفة",
         "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
         "card_title": "تم بنجاح", "card_from": "من", "card_to": "إلى", "card_len": "مدة المقطع",
         "card_time": "وقت المعالجة", "card_count": "عدد الترجمات", "card_font": "الخط", "card_words": "الكلمات",
@@ -259,13 +262,16 @@ STR = {
         "limit_day": "You've reached your daily limit ({n} clips). Try again tomorrow.", "busy_user": "You already have a clip being processed. Wait until it finishes.",
         "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
         "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
-        "retry": "🔄 Try again", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
+        "retry": "🔄 Try again",
+        "preview": "👁 Full preview", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
+        "pv_fonts": "Fonts", "pv_sizes": "Sizes", "pv_styles": "Styles", "pv_pos": "Position", "pv_bi": "Bilingual",
+        "pv_bi_note": "The translation is shown with the second language below it in a smaller font. Arabic + English only: an Arabic translation gets English below it, an English translation gets Arabic.", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
         "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
         "tx_mismatch": "The text has {n} entries but the original has {m}. Keep the same numbering, or send an SRT with timing.",
         "caption_edit": "✅ Your edits were applied.",
-        "bi": "Bilingual", "on": "On", "off": "Off",
+        "bi": "Bilingual (Arabic + English)", "on": "On", "off": "Off",
         "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
         "card_title": "Done", "card_from": "From", "card_to": "To", "card_len": "Clip length",
         "card_time": "Processing time", "card_count": "Subtitles", "card_font": "Font", "card_words": "Words",
@@ -978,11 +984,14 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
             for ln in lines[2:]:
                 small = ln.startswith("\x01")
                 ln = ln.lstrip("\x01")
-                rtl = (job.get("lang") if small else job["tgt"]) in RTL_LANGS
+                rtl = (job.get("bi_lang") if small else job["tgt"]) in RTL_LANGS
                 if rtl:   # keeps ". ، ! ( )" at the correct (left) end of right-to-left lines
                     ln += "\u200f"
-                if small:  # original-language line: smaller and softer
-                    ln = "{\\fs%d\\1c&H00D9D9D9&}" % max(5, round(font_size * 0.7)) + ln
+                if small:  # second-language line: smaller and softer, in a font that has its letters
+                    ar2 = job.get("bi_lang") == "ar"
+                    k = 1.15 if (ar2 and job["tgt"] != "ar") else 0.9 if (not ar2 and job["tgt"] == "ar") else 1.0
+                    ln = ("{\\fn%s\\fs%d\\1c&H00D9D9D9&}" % ("Noto Naskh Arabic" if ar2 else "Noto Sans",
+                                                                  max(5, round(font_size * 0.7 * k)))) + ln
                 fixed.append(ln)
             lines[2:] = fixed
             lines[2] = "{\\an%d}" % align + lines[2]
@@ -1948,6 +1957,7 @@ async def process(bot, chat_id: int, job: dict, status):
             await prog.step("trans")
             gl = await asyncio.to_thread(auto_fixes, segments, alt, names.get(lang, lang))   # automatic proofreading
             segments = apply_glossary(segments, gl)
+            src_segments = segments
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
             if lang != tgt or GROQ_API_KEY:
@@ -1967,7 +1977,23 @@ async def process(bot, chat_id: int, job: dict, status):
                 segments = [(s, e, normalize_ar(t)) for s, e, t in segments]
                 log.info("subtitle text: odd chars before=[%s] after=[%s]", raw_odd,
                          odd_chars(" ".join(t for _, _, t in segments)))
-            origs = orig_texts if (job.get("bi") and mode == "sub" and lang != tgt and len(orig_texts) == len(segments)) else None
+            origs = None
+            if job.get("bi") and mode == "sub" and tgt in ("ar", "en") and len(orig_texts) == len(segments):
+                other = "en" if tgt == "ar" else "ar"     # bilingual = Arabic + English only
+                job["bi_lang"] = other
+                try:
+                    if lang == other:
+                        origs = list(orig_texts)
+                    else:
+                        sec = await asyncio.to_thread(translate_segments, src_segments, lang, other, alt, gl)
+                        sec_t = [t for _, _, t in sec]
+                        if len(sec_t) == len(orig_texts):
+                            names2 = {c: n for n, c in LANG_NAME_TO_CODE.items()}
+                            sec_t = await asyncio.to_thread(review_translation, orig_texts, sec_t, alt,
+                                                            names2.get(lang, lang), names2.get(other, other))
+                            origs = [normalize_ar(clean_text(x)) if other == "ar" else clean_text(x) for x in sec_t]
+                except Exception as e:
+                    log.warning("bilingual second line skipped: %s", str(e)[:150])
             if origs:
                 keep = [i for i, x in enumerate(segments) if x[2]]
                 origs = [origs[i] for i in keep]
@@ -2135,12 +2161,12 @@ def screen_settings(job):
     fonts = fonts_for(job["tgt"])
     font = fonts[job["font_i"] % len(fonts)]
     rows = [
-        [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font"), btn(T(ui, "font_preview"), f"fp|{key}")],
+        [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font")],
         [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
-        [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style"),
-         btn(T(ui, "style_preview"), f"sp|{key}")],
+        [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
-        [btn(f"🌐 {T(ui, 'bi')}: {T(ui, 'on' if job.get('bi') else 'off')}", f"cy|{key}|bi")],
+        *([[btn(f"🌐 {T(ui, 'bi')}: {T(ui, 'on' if job.get('bi') else 'off')}", f"cy|{key}|bi")]] if job["tgt"] in ("ar", "en") else []),
+        [btn(T(ui, "preview"), f"sp|{key}")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
     ]
@@ -2352,22 +2378,118 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job["bi"] = not job.get("bi")
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
-    elif act == "fp":
-        group = "ar" if job["tgt"] in ARABIC_SCRIPT else "lat"
-        png = await font_preview(group)
-        if png:
-            await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "font_preview_cap"))
-    elif act == "sp":
+    elif act in ("fp", "sp"):
         group = "ar" if job["tgt"] in ARABIC_SCRIPT else "lat"
         fonts = fonts_for(job["tgt"])
-        png = await style_preview(group, fonts[job["font_i"] % len(fonts)], ui)
+        png = await combo_preview(group, fonts[job["font_i"] % len(fonts)], ui)
         if png:
-            await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "style_preview_cap"))
+            await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "preview_cap"))
     elif act == "go":
         await begin(context, q, job)
     elif act == "qk":
         job["src"] = None
         await begin(context, q, job)
+
+
+_COMBO_CACHE: dict = {}
+
+
+async def combo_preview(group: str, font: str, ui: str):
+    """One picture with everything: fonts, sizes, styles, position and the bilingual look (cached)."""
+    key = (group, font, ui)
+    if key in _COMBO_CACHE:
+        return _COMBO_CACHE[key]
+    W = 900
+    rtl_ui = ui == "ar"
+    lab = "Noto Naskh Arabic" if rtl_ui else "Noto Sans"
+    sample = "السلام عليكم" if group == "ar" else "Hello world"
+    short = "مرحبا" if group == "ar" else "Hello"
+    fonts = list(FONTS_AR if group == "ar" else FONTS_LAT)
+    ev, styles = [], []
+    L = "0:00:00.00,0:00:05.00"
+
+    def rect(x, y, w, h, col="&H000000&", alpha="&H78&", layer=0):
+        ev.append(f"Dialogue: {layer},{L},Lbl,,0,0,0,,{{\\an7\\pos(0,0)\\p1\\bord0\\1c{col}\\1a{alpha}}}m {x} {y} l {x + w} {y} l {x + w} {y + h} l {x} {y + h}{{\\p0}}")
+
+    def title(y, text):
+        an, x = (9, W - 24) if rtl_ui else (7, 24)
+        ev.append(f"Dialogue: 3,{L},Lbl,,0,0,0,,{{\\an{an}\\pos({x},{y})\\fn{lab}\\b1\\fs38\\1c&H0050D0FF&\\bord2}}{text}")
+
+    def small(x, y, text, an=7, fs=24, col="&H00E8E8E8&"):
+        ev.append(f"Dialogue: 3,{L},Lbl,,0,0,0,,{{\\an{an}\\pos({x},{y})\\fn{lab}\\b1\\fs{fs}\\1c{col}\\bord2}}{text}")
+
+    for i, key_s in enumerate(STYLES):
+        styles.append(_ass_style_line(f"S{i}", font, round(44 * font_scale(font, group)), STYLE_DEFS[key_s]))
+    y = 10
+    # 1) fonts
+    title(y, T(ui, "pv_fonts")); y += 58
+    cw, ch = 438, 110
+    rect(6, y - 4, W - 12, ch * ((len(fonts) + 1) // 2) + 8)
+    for i, name in enumerate(fonts):
+        x0, y0 = 12 + (i % 2) * cw, y + (i // 2) * ch
+        small(x0 + 10, y0 + 4, f"{i + 1}. {name}")
+        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + cw // 2},{y0 + 72})\\fn{name}\\fs{round(44 * font_scale(name, group))}}}{sample}")
+    y += ch * ((len(fonts) + 1) // 2) + 14
+    # 2) sizes
+    title(y, T(ui, "pv_sizes")); y += 58
+    rect(6, y - 4, W - 12, 128)
+    for i, (k, mult) in enumerate(SIZES):
+        x0 = 12 + i * 292
+        small(x0 + 10, y + 4, T(ui, k))
+        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + 146},{y + 82})\\fs{round(32 * mult * font_scale(font, group))}}}{short}")
+    y += 142
+    # 3) styles
+    title(y, T(ui, "pv_styles")); y += 58
+    cw, ch = 450, 100
+    for i, key_s in enumerate(STYLES):
+        cx, cy = (i % 2) * cw, y + (i // 2) * ch
+        ev.append(f"Dialogue: 3,{L},S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + 64})}}{sample}")
+        small(cx + 14, cy + 4, T(ui, "style_" + key_s))
+    y += ch * ((len(STYLES) + 1) // 2) + 14
+    # 4) position (three mini screens)
+    title(y, T(ui, "pv_pos")); y += 58
+    fw, fh = 270, 150
+    for i, (k, _) in enumerate(reversed(POSITIONS)):       # top, middle, bottom
+        x0 = 15 + i * 295
+        rect(x0, y, fw, fh, col="&H303030&", alpha="&H00&")
+        yy = {"pos_top": y + 30, "pos_middle": y + fh // 2, "pos_bottom": y + fh - 30}[k]
+        ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({x0 + fw // 2},{yy})\\fs{round(26 * font_scale(font, group))}}}{short}")
+        small(x0 + fw // 2, y + fh + 6, T(ui, k), an=8, fs=28)
+    y += fh + 56
+    # 5) bilingual
+    title(y, "🌐 " + T(ui, "pv_bi")); y += 58
+    main, sec = ("مرحبا بكم في البوت", "Welcome to the bot") if group == "ar" else ("Welcome to the bot", "مرحبا بكم في البوت")
+    rect(15, y, W - 30, 170, col="&H303030&", alpha="&H00&")
+    ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({W // 2},{y + 55})\\fs{round(42 * font_scale(font, group))}}}{main}")
+    sec_font = "Noto Sans" if group == "ar" else "Noto Naskh Arabic"
+    ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({W // 2},{y + 122})\\fn{sec_font}\\fs30\\1c&H00D9D9D9&}}{sec}")
+    y += 184
+    ev.append(f"Dialogue: 3,{L},Lbl,,40,40,0,,{{\\an8\\pos({W // 2},{y})\\fn{lab}\\fs28\\1c&H00F0F0F0&\\bord2}}{T(ui, 'pv_bi_note')}")
+    H = y + 100
+    ass = (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\nWrapStyle: 0\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Lbl,Noto Sans,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,2,0,7,0,0,0,1\n"
+        + "\n".join(styles)
+        + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(ev) + "\n"
+    )
+    workdir = Path(tempfile.mkdtemp(prefix="combo_"))
+    try:
+        (workdir / "p.ass").write_text(ass, encoding="utf-8")
+        for bg in (f"gradients=s={W}x{H}:c0=0x2b5876:c1=0xc9a27a:x0=0:y0=0:x1={W}:y1={H}:d=1",
+                   f"color=c=0x5a6b7b:s={W}x{H}:d=1"):
+            rc, _, err = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg,
+                                            "-vf", "ass=p.ass", "-frames:v", "1", "p.png"], cwd=str(workdir))
+            if rc == 0 and (workdir / "p.png").exists():
+                _COMBO_CACHE[key] = (workdir / "p.png").read_bytes()
+                return _COMBO_CACHE[key]
+        log.warning("combo preview failed: %s", err.decode(errors="ignore")[-200:])
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 _STYLE_PREVIEW_CACHE: dict = {}
