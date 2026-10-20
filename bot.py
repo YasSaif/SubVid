@@ -1252,6 +1252,20 @@ def _db():
     return psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=8)
 
 
+def _url_shape(url: str) -> str:
+    """Describes the connection string without revealing the password, to find typos."""
+    try:
+        from urllib.parse import urlsplit, unquote
+        u = urlsplit(url)
+        pw = unquote(u.password or "")
+        odd = [c for c in pw if not c.isalnum()]
+        return (f"scheme={u.scheme} user={u.username!r} host={u.hostname} port={u.port} db={u.path!r} "
+                f"password_len={len(pw)} starts_with_bracket={pw.startswith('[')} non_alnum_in_password={len(odd)} "
+                f"has_whitespace={any(ch.isspace() for ch in url)}")
+    except Exception as e:
+        return f"unparsable ({type(e).__name__}): url_len={len(url)} starts={url[:11]!r}"
+
+
 def init_db():
     global DB_OK, DB_STATUS
     if not DATABASE_URL:
@@ -1269,6 +1283,7 @@ def init_db():
     except Exception as e:
         DB_STATUS = f"فشل الاتصال ❌ ({type(e).__name__}: {str(e)[:120]}) - الحفظ في ملف مؤقت"
         log.warning("database unavailable, using the local file: %s", str(e)[:200])
+        log.warning("DATABASE_URL shape (password hidden): %s", _url_shape(DATABASE_URL))
 
 
 def load_prefs():
