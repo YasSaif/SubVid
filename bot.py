@@ -1299,7 +1299,7 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|go|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|go|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
