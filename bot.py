@@ -17,7 +17,7 @@ import threading
 import time
 import unicodedata
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 
 import httpx
@@ -50,13 +50,14 @@ USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (save
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
-SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "2"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
+BURN_PRESET = os.environ.get("BURN_PRESET", "ultrafast")  # ultrafast = fastest encode (slightly bigger file)
+SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "1"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
 SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.12"))  # seconds subtitles are shifted later (text was appearing before the voice)
 GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
-GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
+GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")  # llama-3.3-70b gave model_not_found on this account
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
 TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
 
@@ -96,6 +97,7 @@ CJK = {"zh", "ja", "ko"}  # no CJK font installed -> source only, not burn targe
 TARGETS = [c for c in LANGS if c not in CJK]
 SOURCES = list(LANGS)
 ARABIC_SCRIPT = {"ar", "fa", "ur"}
+RTL_LANGS = {"ar", "fa", "ur", "he"}
 PAGE_SIZE = 10
 
 
@@ -184,6 +186,10 @@ STR = {
         "expired": "انتهت صلاحية الطلب، أعد إرسال الفيديو.",
         "queued": "⏳ جاري التجهيز...",
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
+        "proc_title": "⏳ جاري المعالجة...",
+        "step_dl": "تحميل الفيديو", "step_audio": "استخراج الصوت", "step_tr": "تفريغ الكلام",
+        "step_trans": "الترجمة", "step_burn": "دمج الترجمة بالفيديو", "step_up": "رفع الفيديو", "step_send": "إرسال النتيجة",
+        "secs": "ث",
         "p_dl": "⬇️ جاري تحميل الفيديو...",
         "p_audio": "🎧 جاري استخراج الصوت...",
         "p_tr_auto": "📝 جاري تفريغ الكلام (مع اكتشاف اللغة)...",
@@ -230,6 +236,10 @@ STR = {
         "expired": "This request expired, please send the video again.",
         "queued": "⏳ Preparing...",
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
+        "proc_title": "⏳ Processing...",
+        "step_dl": "Downloading the video", "step_audio": "Extracting audio", "step_tr": "Transcribing speech",
+        "step_trans": "Translating", "step_burn": "Burning subtitles", "step_up": "Uploading the video", "step_send": "Sending the result",
+        "secs": "s",
         "p_dl": "⬇️ Downloading the video...",
         "p_audio": "🎧 Extracting audio...",
         "p_tr_auto": "📝 Transcribing (detecting language)...",
@@ -453,7 +463,7 @@ LANG_NAME_TO_CODE = {
 }
 
 
-_LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]) if m]
+_LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]) if m]
 _llm_bad: dict = {}   # model -> time until which it is skipped
 
 
@@ -492,6 +502,7 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt=""):
             out = json.loads(r.json()["choices"][0]["message"]["content"])["t"]
             if not isinstance(out, list) or len(out) != len(texts):
                 raise ValueError("line count mismatch")
+            log.info("LLM used: %s", model)
             return [str(x).strip() for x in out]
         except Exception as e:
             last = e
@@ -655,6 +666,25 @@ def make_cues(segments, max_chars: int):
     return cues
 
 
+def fix_overlaps(cues, gap=0.04, min_show=0.35):
+    """Cues must never be on screen together: each one ends before the next starts, and is held long
+    enough to read (with a small hold after the voice, because word timings are only approximate)."""
+    cues = sorted(([a, b, t] for a, b, t in cues), key=lambda c: c[0])
+    for i, c in enumerate(cues):
+        a, b, t = c
+        want = max(b + 0.25, a + max(0.8, 0.045 * len(t)))   # hold: at least ~0.8 s or 45 ms per character
+        if i + 1 < len(cues):
+            limit = cues[i + 1][0] - gap
+            if limit - a >= min_show:
+                want = min(want, limit)
+            else:                                           # next one starts too soon: show this one briefly, delay the next
+                want = a + min_show
+                cues[i + 1][0] = want + gap
+                cues[i + 1][1] = max(cues[i + 1][1], cues[i + 1][0] + min_show)
+        c[1] = max(want, a + 0.1)
+    return [(a, b, t) for a, b, t in cues]
+
+
 # -------------------------------------------------------------------- srt
 def srt_time(seconds: float) -> str:
     ms = int(round(seconds * 1000))
@@ -721,7 +751,18 @@ async def probe(video: Path):
     return w, h, duration
 
 
-async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict) -> Path:
+async def src_fps(video: Path) -> float:
+    try:
+        raw = await run_cmd(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=avg_frame_rate", "-of", "csv=p=0", str(video)], timeout=30)
+        num, _, den = raw.decode().strip().partition("/")
+        return float(num) / float(den or 1)
+    except Exception:
+        return 0.0
+
+
+async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict,
+                         duration: float = 0.0, on_frac=None) -> Path:
     scale = ""
     short_side = min(w, h)
     if short_side and short_side != MAX_RES:  # fixed output size: small sources are upscaled so the text stays sharp
@@ -735,7 +776,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     log.info("burn: font=%s size=x%s style=%s pos=%s res=%sx%s", font, SIZES[job["size_i"]][1],
              STYLES[job["style_i"]], POSITIONS[job["pos_i"]][0], w, h)
     mult = SIZES[job["size_i"]][1]
-    base = 12 if portrait else 17  # relative to a 288px-high canvas
+    base = 12 if portrait else 21  # relative to a 288px-high canvas
     font_size = max(6, round(base * mult * font_scale(font, "ar" if job["tgt"] in ARABIC_SCRIPT else "lat")))
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
@@ -757,6 +798,8 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     for block in src_srt.strip().split("\n\n"):
         lines = block.split("\n")
         if len(lines) >= 3:
+            if job["tgt"] in RTL_LANGS:   # keeps ". ، ! ( )" at the correct (left) end of right-to-left lines
+                lines[2:] = [ln + "\u200f" for ln in lines[2:]]
             lines[2] = "{\\an%d}" % align + lines[2]
         tagged.append("\n".join(lines))
     srt_name = "subs_burn.srt"
@@ -764,19 +807,23 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     out = workdir / "output.mp4"
     # srt is referenced by relative name and ffmpeg runs inside workdir -> no path escaping issues
     w, h = w // 2 * 2, h // 2 * 2
+    fps_cap = "fps=30," if await src_fps(video) > 30.5 else ""   # 50/60 fps -> 30 fps: half the work, same look for subtitles
+    scale = fps_cap + scale
     if SS > 1:
         vf = (f"{scale}scale={w * SS}:{h * SS}:flags=bicubic,subtitles={srt_name}:force_style='{style}',"
               f"scale={w}:{h}:flags=area")
     else:
         vf = f"{scale}subtitles={srt_name}:force_style='{style}'"
-    await run_cmd(
+    await run_ffmpeg(
         [
             "ffmpeg", "-y", "-v", "verbose", "-threads", "1", "-filter_threads", "1", "-i", str(video), "-vf", vf,
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "28", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", "29", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", "-threads", "1", "-movflags", "+faststart", str(out),
         ],
         cwd=str(workdir),
         timeout=1500,
+        duration=duration,
+        on_frac=on_frac,
         grep=("fontselect", "Glyph"),
     )
     return out
@@ -834,10 +881,82 @@ async def set_status(msg, text: str):
         pass
 
 
+class Progress:
+    """One status message that shows a checklist (and a bar while burning). Edits are throttled."""
+
+    def __init__(self, ui, msg, mode):
+        self.ui, self.msg = ui, msg
+        self.steps = (["dl", "audio", "tr", "trans", "burn", "up"] if mode == "sub"
+                      else ["dl", "audio", "tr", "trans", "send"])
+        self.cur, self.frac, self.last = None, None, 0.0
+
+    def _text(self) -> str:
+        lines = [T(self.ui, "proc_title"), ""]
+        idx = self.steps.index(self.cur) if self.cur in self.steps else -1
+        for i, k in enumerate(self.steps):
+            label = T(self.ui, "step_" + k)
+            if i < idx:
+                lines.append(f"✅ {label}")
+            elif i == idx:
+                bar = ""
+                if self.frac is not None:
+                    n = int(self.frac * 10)
+                    bar = f"  {'▰' * n}{'▱' * (10 - n)} {int(self.frac * 100)}%"
+                lines.append(f"🔄 {label}{bar}")
+            else:
+                lines.append(f"▫️ {label}")
+        return "\n".join(lines)
+
+    async def step(self, key: str):
+        self.cur, self.frac, self.last = key, None, time.monotonic()
+        await set_status(self.msg, self._text())
+
+    async def update(self, frac: float):
+        if time.monotonic() - self.last < 4:   # Telegram edit limits + keeps the server light
+            return
+        self.frac, self.last = max(0.0, min(frac, 0.99)), time.monotonic()
+        await set_status(self.msg, self._text())
+
+
+async def run_ffmpeg(args, cwd=None, timeout=1500, duration=0.0, on_frac=None, grep=()):
+    """ffmpeg with live progress (-progress pipe:1); stderr is read line by line so memory stays small."""
+    args = [args[0], "-progress", "pipe:1", "-nostats"] + list(args[1:])
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    tail, seen = deque(maxlen=25), []
+
+    async def read_err():
+        async for raw in proc.stderr:
+            line = raw.decode(errors="ignore").rstrip()
+            tail.append(line)
+            if grep and len(seen) < 15 and any(g in line for g in grep) and line not in seen:
+                seen.append(line)
+
+    async def read_out():
+        async for raw in proc.stdout:
+            line = raw.decode(errors="ignore").strip()
+            if line.startswith("out_time_us=") and duration and on_frac:
+                try:
+                    await on_frac(int(line.split("=", 1)[1]) / 1e6 / duration)
+                except ValueError:
+                    pass
+
+    try:
+        await asyncio.wait_for(asyncio.gather(read_out(), read_err(), proc.wait()), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise UserError("timeout")
+    if proc.returncode != 0:
+        raise RuntimeError(f"{args[0]} exited {proc.returncode}: " + "\n".join(list(tail)[-8:])[-1000:])
+    for line in seen:
+        log.info("ffmpeg: %s", line[:220])
+
+
 async def process(bot, chat_id: int, job: dict, status):
     ui, mode, tgt = job["ui"], job["mode"], job["tgt"]
     workdir = Path(tempfile.mkdtemp(prefix="subvid_"))
     st = Stages()
+    prog = Progress(ui, status, mode)
     PENDING.append(job["id"])
     try:
         ahead = PENDING.index(job["id"])
@@ -845,7 +964,7 @@ async def process(bot, chat_id: int, job: dict, status):
             await set_status(status, T(ui, "queue", n=ahead))
         async with JOB_SEM:
             st.reset()  # don't count the time spent waiting in the queue
-            await set_status(status, T(ui, "p_dl"))
+            await prog.step("dl")
             video = await fetch_input(bot, job["kind"], job["data"], workdir, audio_only=(mode == "txt"))
             st.mark("download")
 
@@ -854,7 +973,7 @@ async def process(bot, chat_id: int, job: dict, status):
             if duration and duration > MAX_MINUTES * 60:
                 raise UserError("too_long", m=MAX_MINUTES)
 
-            await set_status(status, T(ui, "p_audio"))
+            await prog.step("audio")
             # clean the audio (rumble/hiss, uneven volume) so recognition doesn't depend on recording quality
             audio = workdir / "audio.flac"
             await run_cmd(
@@ -864,7 +983,7 @@ async def process(bot, chat_id: int, job: dict, status):
             )
             st.mark("audio")
 
-            await set_status(status, T(ui, "p_tr" if job["src"] else "p_tr_auto"))
+            await prog.step("tr")
             segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"])
             st.mark("transcribe")
             log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
@@ -872,7 +991,7 @@ async def process(bot, chat_id: int, job: dict, status):
                 raise UserError("no_speech")
 
             if lang != tgt or GROQ_API_KEY:
-                await set_status(status, T(ui, "p_trans"))
+                await prog.step("trans")
                 segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt)
                 st.mark("translate")
 
@@ -889,14 +1008,15 @@ async def process(bot, chat_id: int, job: dict, status):
 
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
-            base_chars = 28 if portrait else 40
+            base_chars = 28 if portrait else 36
             max_chars = max(14, int(base_chars / mult)) if mode == "sub" else 40
-            cues = make_cues(segments, max_chars)
+            cues = fix_overlaps(make_cues(segments, max_chars))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
             plain = "\n".join(t for _, _, t in segments)
 
             if mode == "txt":
+                await prog.step("send")
                 if len(plain) <= 3500:
                     await bot.send_message(chat_id, f"{T(ui, 'caption_txt')}:\n\n{plain}")
                 else:
@@ -908,18 +1028,20 @@ async def process(bot, chat_id: int, job: dict, status):
                                             caption=T(ui, "caption_srt"))
                 st.mark("send")
             else:
-                await set_status(status, T(ui, "p_burn"))
-                out = await burn_subtitles(video, "subs.srt", workdir, w, h, job)
+                await prog.step("burn")
+                out = await burn_subtitles(video, "subs.srt", workdir, w, h, job, duration, prog.update)
                 st.mark("burn")
                 if out.stat().st_size > TG_UPLOAD_LIMIT:
                     with open(workdir / "subs.srt", "rb") as f:
                         await bot.send_document(chat_id, f, filename="subtitles.srt",
                                                 caption=T(ui, "too_big"))
                 else:
-                    await set_status(status, T(ui, "p_up"))
+                    await prog.step("up")
+                    elapsed = int(time.monotonic() - st.t0)
+                    caption = (f"{T(ui, 'caption_burn')}\n🌐 {LANGS.get(lang, lang)} ➜ {LANGS.get(tgt, tgt)}"
+                               f" · ⏱ {elapsed}{T(ui, 'secs')}")
                     with open(out, "rb") as f:
-                        await bot.send_video(chat_id, f, supports_streaming=True,
-                                             caption=T(ui, "caption_burn"))
+                        await bot.send_video(chat_id, f, supports_streaming=True, caption=caption)
                 st.mark("upload")
         try:
             await status.delete()
