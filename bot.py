@@ -227,6 +227,7 @@ STR = {
         "no_speech": "ما قدرت أرصد كلاماً واضحاً في المقطع.",
         "too_long": "الحد الأقصى لمدة المقطع في هذا الوضع {m} دقيقة. جرّب وضع «نص + SRT» للمقاطع الأطول.",
         "dl_fail": "تعذر تحميل الفيديو من هذا الرابط (قد يكون خاصاً أو محظوراً من السيرفر).",
+        "yt_block": "⚠️ يوتيوب يمنع التحميل من سيرفر البوت حاليًا.\nأرسل الفيديو كملف مباشرة، أو استخدم رابط تيك توك أو رابطًا مباشرًا للفيديو.",
         "dl_empty": "لم يتم العثور على فيديو في هذا الرابط.",
         "file_big": "تيليجرام يمنع البوت من تنزيل ملفات أكبر من 20MB. ارفع الفيديو على أي موقع وأرسل لي الرابط بدلاً من الملف.",
         "translate_fail": "تعذرت الترجمة حالياً (خدمة الترجمة لا تستجيب). حاول بعد قليل.",
@@ -294,6 +295,7 @@ STR = {
         "no_speech": "I couldn't detect clear speech in the clip.",
         "too_long": "Maximum clip length in this mode is {m} minutes. Try the text + SRT mode for longer clips.",
         "dl_fail": "Couldn't download the video from this link (it may be private or blocked from the server).",
+        "yt_block": "⚠️ YouTube is blocking downloads from the bot's server right now.\nSend the video as a file, or use a TikTok link or a direct video link.",
         "dl_empty": "No video found at this link.",
         "file_big": "Telegram doesn't let bots download files over 20MB. Upload the video somewhere and send me the link instead.",
         "translate_fail": "Translation is unavailable right now. Please try again shortly.",
@@ -1043,11 +1045,26 @@ def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
     }
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
+    def _is_botcheck(err) -> bool:
+        m = str(err).lower()
+        return "confirm you" in m and "bot" in m
+
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            if not _is_botcheck(e):
+                raise
+            # YouTube blocks datacenter IPs: try other player clients once before giving up
+            log.info("youtube bot-check, retrying with other clients")
+            opts2 = dict(opts, extractor_args={"youtube": {"player_client": ["tv", "android_vr", "web_safari"]}})
+            with yt_dlp.YoutubeDL(opts2) as ydl:
+                ydl.download([url])
     except Exception as e:
         log.warning("yt-dlp failed for %s: %s", url, e)
+        if _is_botcheck(e):
+            raise UserError("yt_block")
         raise UserError("dl_fail")
     files = [p for p in workdir.glob("input.*") if p.suffix not in (".part", ".ytdl")]
     if not files:
