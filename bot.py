@@ -122,11 +122,32 @@ FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
 SIZES = [("size_s", 0.85), ("size_m", 1.2), ("size_l", 1.65)]
-STYLES = ["classic", "box", "yellow"]
+STYLES = ["classic", "box", "yellow", "yellowbox", "whitebox", "bluebox", "redbox",
+          "green", "cyan", "orange", "pink", "thick", "shadow"]
+
+
+def _plain(color, outline=2, shadow=0, out_color="&H00000000"):
+    return f"PrimaryColour={color},OutlineColour={out_color},BorderStyle=1,Outline={outline},Shadow={shadow}"
+
+
+def _boxed(text_color, box_color, pad=3):
+    return f"PrimaryColour={text_color},OutlineColour={box_color},BackColour={box_color},BorderStyle=3,Outline={pad},Shadow=0"
+
+
 STYLE_DEFS = {  # ASS colours are &HAABBGGRR (AA=00 opaque, FF transparent)
-    "classic": "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0",
-    "yellow": "PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0",
+    "classic": _plain("&H00FFFFFF"),
     "box": "PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BackColour=&H80000000,BorderStyle=3,Outline=3,Shadow=0",
+    "yellow": _plain("&H0000FFFF"),
+    "yellowbox": _boxed("&H00000000", "&H0000E6FF"),
+    "whitebox": _boxed("&H00000000", "&H00FFFFFF"),
+    "bluebox": _boxed("&H00FFFFFF", "&H00C8501E"),
+    "redbox": _boxed("&H00FFFFFF", "&H001E1EC8"),
+    "green": _plain("&H0000FF00"),
+    "cyan": _plain("&H00FFFF00"),
+    "orange": _plain("&H0000A5FF"),
+    "pink": _plain("&H00B469FF"),
+    "thick": _plain("&H00FFFFFF", outline=4),
+    "shadow": _plain("&H00FFFFFF", outline=1, shadow=3, out_color="&H40000000"),
 }
 POSITIONS = [("pos_bottom", 2), ("pos_middle", 5), ("pos_top", 8)]
 
@@ -154,7 +175,10 @@ STR = {
         "font": "الخط", "size": "الحجم", "style": "النمط", "pos": "المكان",
         "font_preview": "🔤 معاينة الخطوط", "font_preview_cap": "🔤 هذي الخطوط بالترتيب اللي تتغير فيه عند الضغط على زر «الخط»",
         "size_s": "صغير", "size_m": "متوسط", "size_l": "كبير",
-        "style_classic": "كلاسيكي", "style_box": "خلفية", "style_yellow": "أصفر",
+        "style_classic": "كلاسيكي", "style_box": "خلفية سوداء", "style_yellow": "أصفر",
+        "style_yellowbox": "خلفية صفراء", "style_whitebox": "خلفية بيضاء", "style_bluebox": "خلفية زرقاء", "style_redbox": "خلفية حمراء",
+        "style_green": "أخضر", "style_cyan": "سماوي", "style_orange": "برتقالي", "style_pink": "وردي", "style_thick": "إطار سميك", "style_shadow": "ظل ناعم",
+        "style_preview": "🎭 معاينة الأنماط", "style_preview_cap": "🎭 الأنماط بالترتيب اللي تتغير فيه عند الضغط على زر «النمط»",
         "pos_bottom": "أسفل", "pos_middle": "وسط", "pos_top": "أعلى",
         "start": "▶️ ابدأ", "cancel": "إلغاء", "cancelled": "تم الإلغاء.",
         "expired": "انتهت صلاحية الطلب، أعد إرسال الفيديو.",
@@ -197,7 +221,10 @@ STR = {
         "font": "Font", "size": "Size", "style": "Style", "pos": "Position",
         "font_preview": "🔤 Preview fonts", "font_preview_cap": "🔤 Fonts in the order the «Font» button cycles through them",
         "size_s": "Small", "size_m": "Medium", "size_l": "Large",
-        "style_classic": "Classic", "style_box": "Box", "style_yellow": "Yellow",
+        "style_classic": "Classic", "style_box": "Black box", "style_yellow": "Yellow",
+        "style_yellowbox": "Yellow box", "style_whitebox": "White box", "style_bluebox": "Blue box", "style_redbox": "Red box",
+        "style_green": "Green", "style_cyan": "Cyan", "style_orange": "Orange", "style_pink": "Pink", "style_thick": "Thick outline", "style_shadow": "Soft shadow",
+        "style_preview": "🎭 Preview styles", "style_preview_cap": "🎭 Styles in the order the «Style» button cycles through them",
         "pos_bottom": "Bottom", "pos_middle": "Middle", "pos_top": "Top",
         "start": "▶️ Start", "cancel": "Cancel", "cancelled": "Cancelled.",
         "expired": "This request expired, please send the video again.",
@@ -281,30 +308,45 @@ def get_model() -> WhisperModel:
         return _model
 
 
+def _groq_asr(audio_path: str, model: str, language, detailed: bool):
+    with open(audio_path, "rb") as f:
+        data = {"model": model, "response_format": "verbose_json", "temperature": "0"}
+        if detailed:
+            data["timestamp_granularities[]"] = ["word", "segment"]
+        if language:
+            data["language"] = language
+        if GROQ_PROMPT:
+            data["prompt"] = GROQ_PROMPT[:800]
+        r = httpx.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            data=data, files={"file": ("audio.flac", f, "audio/flac")}, timeout=120,
+        )
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
 def transcribe_groq(audio_path: str, language=None):
-    last = None
+    """Returns (segments, language, second_opinion_text). The second model is used later to recover words the first one dropped."""
+    d, last = None, None
     for model in (GROQ_ASR_MODEL, GROQ_ASR_FALLBACK):
         try:
-            with open(audio_path, "rb") as f:
-                data = {"model": model, "response_format": "verbose_json", "temperature": "0",
-                        "timestamp_granularities[]": ["word", "segment"]}
-                if language:
-                    data["language"] = language
-                if GROQ_PROMPT:
-                    data["prompt"] = GROQ_PROMPT[:800]
-                r = httpx.post(
-                    "https://api.groq.com/openai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                    data=data, files={"file": ("audio.flac", f, "audio/flac")}, timeout=120,
-                )
-            r.raise_for_status()
+            d = _groq_asr(audio_path, model, language, detailed=True)
+            used = model
             break
         except Exception as e:
             last = e
-            log.warning("Groq ASR %s failed: %s", model, str(e)[:120])
-    else:
+            log.warning("Groq ASR %s failed: %s", model, str(e)[:200])
+    if d is None:
         raise last
-    d = r.json()
+    alt = ""
+    other = GROQ_ASR_FALLBACK if used != GROQ_ASR_FALLBACK else GROQ_ASR_MODEL
+    if other != used:
+        try:
+            alt = _groq_asr(audio_path, other, language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower()), detailed=False).get("text", "").strip()
+        except Exception as e:
+            log.warning("Groq second-opinion ASR failed: %s", str(e)[:150])
     words = [(float(w["start"]), float(w["end"])) for w in d.get("words", []) if "start" in w]
     out = []
     for x in d.get("segments", []):
@@ -317,7 +359,8 @@ def transcribe_groq(audio_path: str, language=None):
             a, b = inside[0][0], inside[-1][1]
         out.append((a + SUB_DELAY, b + SUB_DELAY, text))
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
-    return out, lang
+    log.info("second opinion (%s): %s", other, alt[:400])
+    return out, lang, alt
 
 
 def transcribe(audio_path: str, language=None):
@@ -335,7 +378,7 @@ def transcribe(audio_path: str, language=None):
         language=language,
     )
     out = [(s.start, s.end, s.text.strip()) for s in segments if s.text.strip()]
-    return out, info.language
+    return out, info.language, ""
 
 
 # -------------------------------------------------------------- translate
@@ -410,13 +453,21 @@ LANG_NAME_TO_CODE = {
 }
 
 
-def _llm_batch(texts, src_name, tgt_name, fix_only):
+_LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant"]) if m]
+_llm_bad: dict = {}   # model -> time until which it is skipped
+
+
+def _llm_batch(texts, src_name, tgt_name, fix_only, alt=""):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
         "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
         "NEVER delete or skip words or sentences: every spoken word must stay in the output. "
         "If a word looks garbled, replace it with the most likely intended word given the context. "
     )
+    if alt:
+        task += ("A second speech-recognition model transcribed the same audio as: \"" + alt[:1500] + "\". "
+                 "Where the lines miss a word or phrase that the second transcript has and it fits the context, "
+                 "put it back into the right line. ")
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
     else:
@@ -424,23 +475,34 @@ def _llm_batch(texts, src_name, tgt_name, fix_only):
                  f"fluent {tgt_name}, as a native speaker would say it. Keep proper names correct.")
     task += (' Return JSON {"t": [...]} with EXACTLY the same number of items, in the same order, '
              "one output string per input line. No explanations.")
-    r = httpx.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        json={"model": GROQ_LLM_MODEL, "temperature": 0.2, "response_format": {"type": "json_object"},
-              "messages": [{"role": "system", "content": task},
-                           {"role": "user", "content": json.dumps({"lines": texts}, ensure_ascii=False)}]},
-        timeout=60,
-    )
-    r.raise_for_status()
-    out = json.loads(r.json()["choices"][0]["message"]["content"])["t"]
-    if not isinstance(out, list) or len(out) != len(texts):
-        raise ValueError("line count mismatch")
-    return [str(x).strip() for x in out]
+    last = None
+    for model in _LLM_MODELS:
+        if _llm_bad.get(model, 0) > time.time():
+            continue
+        body = {"model": model, "temperature": 0.2, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": task},
+                             {"role": "user", "content": json.dumps({"lines": texts}, ensure_ascii=False)}]}
+        if model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"
+        try:
+            r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
+                           headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=60)
+            if r.status_code >= 400:
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+            out = json.loads(r.json()["choices"][0]["message"]["content"])["t"]
+            if not isinstance(out, list) or len(out) != len(texts):
+                raise ValueError("line count mismatch")
+            return [str(x).strip() for x in out]
+        except Exception as e:
+            last = e
+            log.warning("Groq LLM %s failed: %s", model, str(e)[:250])
+            if "HTTP 404" in str(e) or "HTTP 403" in str(e):
+                _llm_bad[model] = time.time() + 3600   # not available for this account -> skip for an hour
+    raise last or RuntimeError("no LLM model available")
 
 
-def translate_segments_llm(segments, src: str, tgt: str):
-    """Context-aware translation + correction via Groq (Llama). Raises on failure."""
+def translate_segments_llm(segments, src: str, tgt: str, alt: str = ""):
+    """Context-aware translation + correction via Groq. Raises on failure."""
     names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
     src_name, tgt_name = names.get(src, src), names.get(tgt, tgt)
     texts = [" ".join(t.split()) for _, _, t in segments]
@@ -449,21 +511,20 @@ def translate_segments_llm(segments, src: str, tgt: str):
         batch = texts[i:i + 30]
         for attempt in range(2):
             try:
-                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt))
+                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "")
                 break
-            except Exception as e:
+            except Exception:
                 if attempt == 1:
                     raise
-                log.warning("LLM batch failed, retrying: %s", str(e)[:120])
                 time.sleep(2)
     return [(s, e, r or t) for (s, e, _), r, t in zip(segments, result, texts)]
 
 
-def translate_segments(segments, src: str, tgt: str):
+def translate_segments(segments, src: str, tgt: str, alt: str = ""):
     """Translate in a few small batches (one segment per line)."""
     if GROQ_API_KEY:
         try:
-            return translate_segments_llm(segments, src, tgt)
+            return translate_segments_llm(segments, src, tgt, alt)
         except Exception as e:
             log.warning("Groq translation failed, using fallback chain: %s", str(e)[:150])
     if src == tgt:
@@ -804,7 +865,7 @@ async def process(bot, chat_id: int, job: dict, status):
             st.mark("audio")
 
             await set_status(status, T(ui, "p_tr" if job["src"] else "p_tr_auto"))
-            segments, lang = await asyncio.to_thread(transcribe, str(audio), job["src"])
+            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"])
             st.mark("transcribe")
             log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
@@ -812,7 +873,7 @@ async def process(bot, chat_id: int, job: dict, status):
 
             if lang != tgt or GROQ_API_KEY:
                 await set_status(status, T(ui, "p_trans"))
-                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt)
+                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt)
                 st.mark("translate")
 
             keep_joiners = tgt in ("fa", "ur")
@@ -946,7 +1007,8 @@ def screen_settings(job):
     rows = [
         [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font"), btn(T(ui, "font_preview"), f"fp|{key}")],
         [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
-        [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
+        [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style"),
+         btn(T(ui, "style_preview"), f"sp|{key}")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
@@ -1100,8 +1162,67 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         png = await font_preview(group)
         if png:
             await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "font_preview_cap"))
+    elif act == "sp":
+        group = "ar" if job["tgt"] in ARABIC_SCRIPT else "lat"
+        fonts = fonts_for(job["tgt"])
+        png = await style_preview(group, fonts[job["font_i"] % len(fonts)], ui)
+        if png:
+            await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "style_preview_cap"))
     elif act == "go":
         await begin(context, q, job)
+
+
+_STYLE_PREVIEW_CACHE: dict = {}
+
+
+def _ass_style_line(name: str, font: str, size: int, defs: str) -> str:
+    d = dict(kv.split("=", 1) for kv in defs.split(","))
+    return (f"Style: {name},{font},{size},{d['PrimaryColour']},&H000000FF,{d['OutlineColour']},"
+            f"{d.get('BackColour', '&H00000000')},1,0,0,0,100,100,0,0,{d['BorderStyle']},{d['Outline']},"
+            f"{d['Shadow']},5,0,0,0,1")
+
+
+async def style_preview(group: str, font: str, ui: str):
+    """PNG with every subtitle style over a video-like background (cached)."""
+    key = (group, font, ui)
+    if key in _STYLE_PREVIEW_CACHE:
+        return _STYLE_PREVIEW_CACHE[key]
+    sample = "السلام عليكم" if group == "ar" else "Hello world"
+    cols, cw, ch = 2, 360, 96
+    rows = (len(STYLES) + cols - 1) // cols
+    width, height = cols * cw, rows * ch
+    size = round(34 * font_scale(font, group))
+    label_font = "Noto Naskh Arabic" if ui == "ar" else "Noto Sans"
+    styles, events = [], []
+    for i, key_s in enumerate(STYLES):
+        cx, cy = (i % cols) * cw, (i // cols) * ch
+        styles.append(_ass_style_line(f"S{i}", font, size, STYLE_DEFS[key_s]))
+        events.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + ch // 2 + 8})}}{sample}")
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,Lbl,,0,0,0,,{{\\an7\\pos({cx + 8},{cy + 4})\\fn{label_font}\\fs15}}{T(ui, 'style_' + key_s)}")
+    ass = (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Lbl,Noto Sans,15,&H00E0E0E0,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n"
+        + "\n".join(styles)
+        + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(events) + "\n"
+    )
+    workdir = Path(tempfile.mkdtemp(prefix="stylprev_"))
+    try:
+        (workdir / "p.ass").write_text(ass, encoding="utf-8")
+        for bg in (f"gradients=s={width}x{height}:c0=0x2b5876:c1=0xc9a27a:x0=0:y0=0:x1={width}:y1={height}:d=1",
+                   f"color=c=0x5a6b7b:s={width}x{height}:d=1"):
+            rc, _, err = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg,
+                                            "-vf", "ass=p.ass", "-frames:v", "1", "p.png"], cwd=str(workdir))
+            if rc == 0 and (workdir / "p.png").exists():
+                _STYLE_PREVIEW_CACHE[key] = (workdir / "p.png").read_bytes()
+                return _STYLE_PREVIEW_CACHE[key]
+        log.warning("style preview failed: %s", err.decode(errors="ignore")[-200:])
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 _PREVIEW_CACHE: dict = {}
@@ -1305,7 +1426,7 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|go|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
