@@ -193,7 +193,7 @@ STR = {
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
         "proc_title": "⏳ جاري المعالجة...",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
-        "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
+        "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
         "tx_mismatch": "عدد المقاطع في النص ({n}) لا يطابق الأصل ({m}). أبقِ نفس الترقيم، أو أرسل SRT بتوقيتك.",
         "caption_edit": "✅ تم تطبيق تعديلاتك.",
@@ -254,7 +254,7 @@ STR = {
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
         "proc_title": "⏳ Processing...",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
-        "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
+        "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
         "tx_mismatch": "The text has {n} entries but the original has {m}. Keep the same numbering, or send an SRT with timing.",
         "caption_edit": "✅ Your edits were applied.",
@@ -1470,8 +1470,15 @@ async def offer_text_edit(bot, chat_id, ui, jid):
 
 
 def export_text(cues) -> str:
-    return "\n\n".join(f"{i}\n" + "\n".join(ln for ln in t.split("\n") if not ln.startswith("\x01"))
+    """Numbered entries; the bilingual original lines are shown with a leading '| ' (the translation is the main text)."""
+    return "\n\n".join(f"{i}\n" + "\n".join(("| " + ln[1:]) if ln.startswith("\x01") else ln for ln in t.split("\n"))
                         for i, (_, _, t) in enumerate(cues, 1))
+
+
+def _split_marks(t: str):
+    main = [ln for ln in t.split("\n") if not ln.startswith("\x01")]
+    small = [ln for ln in t.split("\n") if ln.startswith("\x01")]
+    return main, small
 
 
 _TIME_RE = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
@@ -1492,6 +1499,7 @@ def parse_edit(text: str):
             start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
             end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
             lines = lines[1:]
+        lines = [("\x01" + ln.lstrip()[1:].strip()) if ln.lstrip().startswith("|") else ln for ln in lines]
         if lines:
             out.append((start, end, "\n".join(lines)))
     return out
@@ -1526,13 +1534,19 @@ async def apply_edit(msg, ui, text: str):
         return
     max_chars = chars_per_line(st["w"], st["h"], st["job"])
     if all(a is not None for a, _, _ in edits):          # full SRT with its own timing
-        cues = [(a, b, t if "\n" in t else wrap2(t, max_chars)) for a, b, t in edits]
+        cues = []
+        for a, b, t in edits:
+            main, small = _split_marks(t)
+            main = main if len(main) > 1 else [wrap2(" ".join(main), max_chars)]
+            cues.append((a, b, "\n".join(main + small)))
     elif len(edits) == len(old):                          # same numbering: keep the original timing
         cues = []
         for (a, b, oldt), (_, _, t) in zip(old, edits):
-            small = [ln for ln in oldt.split("\n") if ln.startswith("\x01")]   # keep the bilingual original lines
-            t = t if "\n" in t else wrap2(t, max_chars)
-            cues.append((a, b, "\n".join([t] + small)))
+            main, small = _split_marks(t)
+            if not small:                                   # user removed/omitted the original lines -> keep the old ones
+                small = [ln for ln in oldt.split("\n") if ln.startswith("\x01")]
+            main = main if len(main) > 1 else [wrap2(" ".join(main), max_chars)]
+            cues.append((a, b, "\n".join(main + small)))
     else:
         await msg.reply_text(T(ui, "tx_mismatch", n=len(edits), m=len(old)))
         return
