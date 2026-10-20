@@ -197,7 +197,7 @@ STR = {
         "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
         "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
         "retry": "🔄 إعادة المحاولة",
-        "preview": "👁 معاينة مباشرة", "preview_all": "🔤 كل الخيارات", "live_cap": "👁 معاينة مباشرة — تتحدث تلقائيًا مع كل تغيير في الخط أو الحجم أو النمط أو المكان أو الثنائية", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
+        "preview": "👁 معاينة مباشرة", "preview_all": "ℹ️ توضيح", "live_cap": "👁 معاينة مباشرة — تتحدث تلقائيًا مع كل تغيير في الخط أو الحجم أو النمط أو المكان أو الثنائية", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
         "pv_fonts": "الخطوط", "pv_sizes": "الأحجام", "pv_styles": "الأنماط", "pv_pos": "المكان", "pv_bi": "ثنائية اللغة",
         "pv_bi_note": "الترجمة فوق\\Nواللغة الثانية تحتها بخط أصغر", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
@@ -264,7 +264,7 @@ STR = {
         "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
         "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
         "retry": "🔄 Try again",
-        "preview": "👁 Live preview", "preview_all": "🔤 All options", "live_cap": "👁 Live preview — updates automatically whenever you change font, size, style, position or bilingual", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
+        "preview": "👁 Live preview", "preview_all": "ℹ️ Guide", "live_cap": "👁 Live preview — updates automatically whenever you change font, size, style, position or bilingual", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
         "pv_fonts": "Fonts", "pv_sizes": "Sizes", "pv_styles": "Styles", "pv_pos": "Position", "pv_bi": "Bilingual",
         "pv_bi_note": "Translation on top\\Nsecond language below, smaller", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
@@ -2198,12 +2198,13 @@ def screen_settings(job):
     fonts = fonts_for(job["tgt"])
     font = fonts[job["font_i"] % len(fonts)]
     rows = [
+        [btn(T(ui, "preview_all"), f"fp|{key}")],
         [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font")],
         [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
         [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
         [btn(f"🌐 {T(ui, 'bi')}: {bi_label(job)}", f"bi|{key}")],
-        [btn(T(ui, "preview"), f"sp|{key}"), btn(T(ui, "preview_all"), f"fp|{key}")],
+        [btn(T(ui, "preview"), f"sp|{key}")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
     ]
