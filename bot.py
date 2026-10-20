@@ -54,6 +54,7 @@ SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "2"))))  # render subti
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
+SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.12"))  # seconds subtitles are shifted later (text was appearing before the voice)
 GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
 GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
@@ -103,11 +104,15 @@ def ordered(codes, first):
 
 
 # ----------------------------------------------------------------- styles
-FONTS_AR = ["Noto Sans Arabic", "Noto Naskh Arabic", "Noto Kufi Arabic", "Amiri"]
-CANDIDATES_AR_ALL = list(FONTS_AR)
-if os.environ.get("ENABLE_KUFI") != "1":   # Kufi renders as empty boxes in burned video on this server
-    FONTS_AR.remove("Noto Kufi Arabic")
-FONTS_LAT = ["Noto Sans", "Noto Serif"]
+# /fonttest on the server showed: Noto Sans Arabic -> boxes where "لا" appears, Noto Kufi Arabic -> all boxes.
+# Only fonts verified to render correctly are offered (set ENABLE_BROKEN_FONTS=1 to offer all).
+# Naskh + Amiri: verified on the server. DejaVu Sans + FreeSerif: verified in a libass test (Arabic incl. "لا").
+FONTS_AR = ["Noto Naskh Arabic", "Amiri", "DejaVu Sans", "FreeSerif"]
+CANDIDATES_AR_ALL = FONTS_AR + ["Noto Sans Arabic", "Noto Kufi Arabic"]
+if os.environ.get("ENABLE_BROKEN_FONTS") == "1":
+    FONTS_AR = list(CANDIDATES_AR_ALL)
+FONT_SCALE = {"Amiri": 1.3}   # Amiri's letters are drawn smaller than other fonts at the same size
+FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
 SIZES = [("size_s", 0.85), ("size_m", 1.2), ("size_l", 1.65)]
@@ -141,6 +146,7 @@ STR = {
         "mode_txt": "📄 نص الترجمة + ملف SRT",
         "settings": "🎨 تخصيص الترجمة\nاضغط على أي زر لتغيير الخيار، ثم اضغط «ابدأ».",
         "font": "الخط", "size": "الحجم", "style": "النمط", "pos": "المكان",
+        "font_preview": "🔤 معاينة الخطوط", "font_preview_cap": "🔤 هذي الخطوط بالترتيب اللي تتغير فيه عند الضغط على زر «الخط»",
         "size_s": "صغير", "size_m": "متوسط", "size_l": "كبير",
         "style_classic": "كلاسيكي", "style_box": "خلفية", "style_yellow": "أصفر",
         "pos_bottom": "أسفل", "pos_middle": "وسط", "pos_top": "أعلى",
@@ -183,6 +189,7 @@ STR = {
         "mode_txt": "📄 Translated text + SRT file",
         "settings": "🎨 Subtitle style\nTap a button to change an option, then press Start.",
         "font": "Font", "size": "Size", "style": "Style", "pos": "Position",
+        "font_preview": "🔤 Preview fonts", "font_preview_cap": "🔤 Fonts in the order the «Font» button cycles through them",
         "size_s": "Small", "size_m": "Medium", "size_l": "Large",
         "style_classic": "Classic", "style_box": "Box", "style_yellow": "Yellow",
         "pos_bottom": "Bottom", "pos_middle": "Middle", "pos_top": "Top",
@@ -273,7 +280,8 @@ def transcribe_groq(audio_path: str, language=None):
     for model in (GROQ_ASR_MODEL, GROQ_ASR_FALLBACK):
         try:
             with open(audio_path, "rb") as f:
-                data = {"model": model, "response_format": "verbose_json", "temperature": "0"}
+                data = {"model": model, "response_format": "verbose_json", "temperature": "0",
+                        "timestamp_granularities[]": ["word", "segment"]}
                 if language:
                     data["language"] = language
                 if GROQ_PROMPT:
@@ -291,9 +299,17 @@ def transcribe_groq(audio_path: str, language=None):
     else:
         raise last
     d = r.json()
-    out = [(float(x["start"]), float(x["end"]), x["text"].strip())
-           for x in d.get("segments", []) if x.get("text", "").strip()
-           and float(x.get("no_speech_prob", 0)) < 0.8]
+    words = [(float(w["start"]), float(w["end"])) for w in d.get("words", []) if "start" in w]
+    out = []
+    for x in d.get("segments", []):
+        text = x.get("text", "").strip()
+        if not text or float(x.get("no_speech_prob", 0)) >= 0.8:
+            continue
+        a, b = float(x["start"]), float(x["end"])
+        inside = [w for w in words if a - 0.05 <= (w[0] + w[1]) / 2 <= b + 0.05]
+        if inside:  # word timing is tighter than the segment edges -> subtitle matches the voice
+            a, b = inside[0][0], inside[-1][1]
+        out.append((a + SUB_DELAY, b + SUB_DELAY, text))
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
     return out, lang
 
@@ -392,6 +408,8 @@ def _llm_batch(texts, src_name, tgt_name, fix_only):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
         "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
+        "NEVER delete or skip words or sentences: every spoken word must stay in the output. "
+        "If a word looks garbled, replace it with the most likely intended word given the context. "
     )
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
@@ -651,11 +669,11 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
              STYLES[job["style_i"]], POSITIONS[job["pos_i"]][0], w, h)
     mult = SIZES[job["size_i"]][1]
     base = 12 if portrait else 17  # relative to a 288px-high canvas
-    font_size = max(6, round(base * mult))
+    font_size = max(6, round(base * mult * FONT_SCALE.get(font, 1.0)))
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
     if align == 2:
-        margin_v = 35 if portrait else 15
+        margin_v = 22 if portrait else 12
     elif align == 8:
         margin_v = 30 if portrait else 12
     else:
@@ -782,6 +800,7 @@ async def process(bot, chat_id: int, job: dict, status):
             await set_status(status, T(ui, "p_tr" if job["src"] else "p_tr_auto"))
             segments, lang = await asyncio.to_thread(transcribe, str(audio), job["src"])
             st.mark("transcribe")
+            log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
                 raise UserError("no_speech")
 
@@ -919,7 +938,7 @@ def screen_settings(job):
     fonts = fonts_for(job["tgt"])
     font = fonts[job["font_i"] % len(fonts)]
     rows = [
-        [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font")],
+        [btn(f"{T(ui, 'font')}: {font}", f"cy|{key}|font"), btn(T(ui, "font_preview"), f"fp|{key}")],
         [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
         [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
@@ -1070,8 +1089,56 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job["pos_i"] = (job["pos_i"] + 1) % len(POSITIONS)
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
+    elif act == "fp":
+        group = "ar" if job["tgt"] in ARABIC_SCRIPT else "lat"
+        png = await font_preview(group)
+        if png:
+            await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "font_preview_cap"))
     elif act == "go":
         await begin(context, q, job)
+
+
+_PREVIEW_CACHE: dict = {}
+
+
+async def font_preview(group: str):
+    """PNG showing every offered font written in itself (cached). Same libass/ffmpeg path as the burn."""
+    if group in _PREVIEW_CACHE:
+        return _PREVIEW_CACHE[group]
+    fonts = list(FONTS_AR if group == "ar" else FONTS_LAT)
+    sample = "السلام عليكم ورحمة الله ١٢٣" if group == "ar" else "Hello world 123 - Aa Bb Cc"
+    row_h, width = 64, 720
+    height = row_h * len(fonts) + 16
+    events = []
+    for i, name in enumerate(fonts):
+        y = 8 + row_h * i + row_h // 2
+        size = round(30 * FONT_SCALE.get(name, 1.0))
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,L,,0,0,0,,{{\\an4\\pos(16,{y})\\fnNoto Sans\\fs20\\1c&H00B0B0B0&}}{i + 1}. {name}")
+        events.append(f"Dialogue: 0,0:00:00.00,0:00:05.00,S,,0,0,0,,{{\\an6\\pos({width - 16},{y})\\fn{name}\\fs{size}}}{sample}")
+    ass = (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: L,Noto Sans,20,&H00B0B0B0,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,4,0,0,0,1\n"
+        "Style: S,Noto Sans,30,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,6,0,0,0,1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(events) + "\n"
+    )
+    workdir = Path(tempfile.mkdtemp(prefix="fontprev_"))
+    try:
+        (workdir / "p.ass").write_text(ass, encoding="utf-8")
+        rc, _, err = await run_capture(
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"color=c=0x1E1E1E:s={width}x{height}:d=1",
+             "-vf", "ass=p.ass", "-frames:v", "1", "p.png"], cwd=str(workdir))
+        png = workdir / "p.png"
+        if rc == 0 and png.exists():
+            _PREVIEW_CACHE[group] = png.read_bytes()
+            return _PREVIEW_CACHE[group]
+        log.warning("font preview failed: %s", err.decode(errors="ignore")[-200:])
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 async def run_capture(args, cwd=None, timeout=60):
