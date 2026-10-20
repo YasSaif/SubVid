@@ -199,13 +199,14 @@ STR = {
         "retry": "🔄 إعادة المحاولة",
         "preview": "👁 معاينة شاملة", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
         "pv_fonts": "الخطوط", "pv_sizes": "الأحجام", "pv_styles": "الأنماط", "pv_pos": "المكان", "pv_bi": "ثنائية اللغة",
-        "pv_bi_note": "تظهر الترجمة وتحتها اللغة الثانية بخط أصغر. للعربية والإنجليزية فقط: إذا كانت الترجمة عربية يضاف الإنجليزي تحتها، وإذا كانت إنجليزية يضاف العربي.", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
+        "pv_bi_note": "تظهر الترجمة وتحتها اللغة الثانية بخط أصغر. تختار اللغة الثانية من بين كل اللغات (أو تتركها «اللغة الأصلية» للفيديو).", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
         "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
         "tx_mismatch": "عدد المقاطع في النص ({n}) لا يطابق الأصل ({m}). أبقِ نفس الترقيم، أو أرسل SRT بتوقيتك.",
         "caption_edit": "✅ تم تطبيق تعديلاتك.",
-        "bi": "ثنائية اللغة (عربي/إنجليزي)", "on": "مفعّلة", "off": "متوقفة",
+        "bi": "ثنائية اللغة", "bi_src": "اللغة الأصلية للفيديو", "bi_off": "إيقاف", "bi_back": "↩ رجوع",
+        "bi_pick": "🌐 اختر اللغة الثانية التي تظهر تحت الترجمة بخط أصغر.\n«اللغة الأصلية» تعرض ما قيل في الفيديو بعد تصحيحه.", "on": "مفعّلة", "off": "متوقفة",
         "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
         "card_title": "تم بنجاح", "card_from": "من", "card_to": "إلى", "card_len": "مدة المقطع",
         "card_time": "وقت المعالجة", "card_count": "عدد الترجمات", "card_font": "الخط", "card_words": "الكلمات",
@@ -265,13 +266,14 @@ STR = {
         "retry": "🔄 Try again",
         "preview": "👁 Full preview", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
         "pv_fonts": "Fonts", "pv_sizes": "Sizes", "pv_styles": "Styles", "pv_pos": "Position", "pv_bi": "Bilingual",
-        "pv_bi_note": "The translation is shown with the second language below it in a smaller font. Arabic + English only: an Arabic translation gets English below it, an English translation gets Arabic.", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
+        "pv_bi_note": "The translation is shown with the second language below it in a smaller font. You pick the second language from all languages (or keep the video\'s original language).", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
         "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
         "tx_mismatch": "The text has {n} entries but the original has {m}. Keep the same numbering, or send an SRT with timing.",
         "caption_edit": "✅ Your edits were applied.",
-        "bi": "Bilingual (Arabic + English)", "on": "On", "off": "Off",
+        "bi": "Bilingual", "bi_src": "Original language", "bi_off": "Off", "bi_back": "↩ Back",
+        "bi_pick": "🌐 Choose the second language shown under the translation in a smaller font.\n\"Original language\" shows what was said in the video, corrected.", "on": "On", "off": "Off",
         "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
         "card_title": "Done", "card_from": "From", "card_to": "To", "card_len": "Clip length",
         "card_time": "Processing time", "card_count": "Subtitles", "card_font": "Font", "card_words": "Words",
@@ -988,8 +990,8 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
                 if rtl:   # keeps ". ، ! ( )" at the correct (left) end of right-to-left lines
                     ln += "\u200f"
                 if small:  # second-language line: smaller and softer, in a font that has its letters
-                    ar2 = job.get("bi_lang") == "ar"
-                    k = 1.15 if (ar2 and job["tgt"] != "ar") else 0.9 if (not ar2 and job["tgt"] == "ar") else 1.0
+                    ar2 = job.get("bi_lang") in ARABIC_SCRIPT
+                    k = 1.15 if (ar2 and job["tgt"] not in ARABIC_SCRIPT) else 0.9 if (not ar2 and job["tgt"] in ARABIC_SCRIPT) else 1.0
                     ln = ("{\\fn%s\\fs%d\\1c&H00D9D9D9&}" % ("Noto Naskh Arabic" if ar2 else "Noto Sans",
                                                                   max(5, round(font_size * 0.7 * k)))) + ln
                 fixed.append(ln)
@@ -1978,11 +1980,14 @@ async def process(bot, chat_id: int, job: dict, status):
                 log.info("subtitle text: odd chars before=[%s] after=[%s]", raw_odd,
                          odd_chars(" ".join(t for _, _, t in segments)))
             origs = None
-            if job.get("bi") and mode == "sub" and tgt in ("ar", "en") and len(orig_texts) == len(segments):
-                other = "en" if tgt == "ar" else "ar"     # bilingual = Arabic + English only
+            bi = job.get("bi")
+            if bi and mode == "sub" and len(orig_texts) == len(segments):
+                other = lang if bi in (True, "src") else bi       # second language: the original, or any language chosen
                 job["bi_lang"] = other
                 try:
-                    if lang == other:
+                    if other == tgt:
+                        origs = None                                # same as the main line: nothing to add
+                    elif other == lang:
                         origs = list(orig_texts)
                     else:
                         sec = await asyncio.to_thread(translate_segments, src_segments, lang, other, alt, gl)
@@ -1991,7 +1996,7 @@ async def process(bot, chat_id: int, job: dict, status):
                             names2 = {c: n for n, c in LANG_NAME_TO_CODE.items()}
                             sec_t = await asyncio.to_thread(review_translation, orig_texts, sec_t, alt,
                                                             names2.get(lang, lang), names2.get(other, other))
-                            origs = [normalize_ar(clean_text(x)) if other == "ar" else clean_text(x) for x in sec_t]
+                            origs = [normalize_ar(clean_text(x)) if other in ARABIC_SCRIPT else clean_text(x) for x in sec_t]
                 except Exception as e:
                     log.warning("bilingual second line skipped: %s", str(e)[:150])
             if origs:
@@ -2156,6 +2161,38 @@ def screen_mode(job):
     return T(ui, "mode_q"), InlineKeyboardMarkup(rows)
 
 
+def bi_label(job) -> str:
+    v, ui = job.get("bi"), job["ui"]
+    if not v:
+        return T(ui, "bi_off")
+    return T(ui, "bi_src") if v in (True, "src") else LANGS.get(v, str(v))
+
+
+def screen_bi(job, page=0):
+    ui, key = job["ui"], job["id"]
+    codes = ordered(TARGETS, ui)
+    rows = [[btn(("✅ " if not job.get("bi") else "") + T(ui, "bi_off"), f"bp|{key}|off"),
+             btn(("✅ " if job.get("bi") in (True, "src") else "") + T(ui, "bi_src"), f"bp|{key}|src")]]
+    chunk = codes[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    row = []
+    for c in chunk:
+        row.append(btn(("✅ " if job.get("bi") == c else "") + LANGS[c], f"bp|{key}|{c}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(btn("◀", f"bil|{key}|{page - 1}"))
+    if (page + 1) * PAGE_SIZE < len(codes):
+        nav.append(btn("▶", f"bil|{key}|{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([btn(T(ui, "bi_back"), f"bk|{key}")])
+    return T(ui, "bi_pick"), InlineKeyboardMarkup(rows)
+
+
 def screen_settings(job):
     ui, key = job["ui"], job["id"]
     fonts = fonts_for(job["tgt"])
@@ -2165,7 +2202,7 @@ def screen_settings(job):
         [btn(f"{T(ui, 'size')}: {T(ui, SIZES[job['size_i']][0])}", f"cy|{key}|size")],
         [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
-        *([[btn(f"🌐 {T(ui, 'bi')}: {T(ui, 'on' if job.get('bi') else 'off')}", f"cy|{key}|bi")]] if job["tgt"] in ("ar", "en") else []),
+        [btn(f"🌐 {T(ui, 'bi')}: {bi_label(job)}", f"bi|{key}")],
         [btn(T(ui, "preview"), f"sp|{key}")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
@@ -2183,7 +2220,7 @@ def new_job(kind: str, data: str, ui: str, uid=None) -> dict:
         "mode": pr.get("mode", "sub"), "uid": uid,
         "font_i": int(pr.get("font_i", 0)), "size_i": min(int(pr.get("size_i", 1)), len(SIZES) - 1),
         "style_i": min(int(pr.get("style_i", 0)), len(STYLES) - 1), "pos_i": min(int(pr.get("pos_i", 0)), len(POSITIONS) - 1),
-        "bi": bool(pr.get("bi", False)), "saved": bool(pr.get("tgt")),
+        "bi": ("src" if pr.get("bi") is True else (pr.get("bi") or False)), "saved": bool(pr.get("tgt")),
     }
     while len(JOBS) > 300:
         JOBS.popitem(last=False)
@@ -2364,6 +2401,17 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text, markup = screen_settings(job)
             await safe_edit(q, text, markup)
+    elif act in ("bi", "bil"):
+        text, markup = screen_bi(job, int(parts[2]) if act == "bil" else 0)
+        await safe_edit(q, text, markup)
+    elif act == "bp":
+        v = parts[2]
+        job["bi"] = False if v == "off" else "src" if v == "src" else (v if v in LANGS else False)
+        text, markup = screen_settings(job)
+        await safe_edit(q, text, markup)
+    elif act == "bk":
+        text, markup = screen_settings(job)
+        await safe_edit(q, text, markup)
     elif act == "cy":
         field = parts[2]
         if field == "font":
@@ -2842,7 +2890,7 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|rt|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|rt|bi|bil|bp|bk|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
