@@ -9,11 +9,11 @@ DATABASE_URL='PUT_SUPABASE_SESSION_POOLER_URL_HERE'
 exec > /var/log/subvid-setup.log 2>&1
 set -x
 say() { curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" -d chat_id="${ADMIN_ID}" --data-urlencode text="$1" >/dev/null; }
-trap 'say "❌ إعداد السيرفر فشل. آخر الأسطر:
+trap 'say "SubVid setup FAILED. Last lines:
 $(tail -n 8 /var/log/subvid-setup.log | cut -c1-200)"' ERR
 set -e
 
-say "⏳ بدأ إعداد سيرفر Oracle (يستغرق 5 إلى 10 دقائق)..."
+say "SubVid: Oracle server setup started (5-10 min)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y git curl
@@ -49,4 +49,4 @@ chmod +x /usr/local/bin/subvid-update
 /usr/local/bin/subvid-update
 echo "30 4 * * * root /usr/local/bin/subvid-update >> /var/log/subvid-update.log 2>&1" > /etc/cron.d/subvid-update
 
-say "✅ تم إعداد سيرفر Oracle والبوت يعمل عليه. (إذا كانت خدمة Render ما زالت شغالة فأوقفها حتى لا يتعارضا)"
+say "SubVid: Oracle server is READY and the bot is running. Now suspend the Render service so they do not conflict."

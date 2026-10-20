@@ -1400,7 +1400,24 @@ PREFS: dict = {}          # str(user id) -> {"ui","tgt","mode","font_i","size_i"
 _prefs_lock = threading.Lock()
 
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+def _clean_db_url(url: str) -> str:
+    """Fixes typical phone-typing damage: spaces/quotes, 'Postgresql://' capital letter, and an '@' inside the password."""
+    url = "".join(url.split()).strip("'\"")
+    m = re.match(r"(?i)^(postgres(?:ql)?)://(.*)$", url)
+    if not m:
+        return url
+    rest = m.group(2)
+    if "@" in rest:
+        cred, hostpart = rest.rsplit("@", 1)
+        if ":" in cred:
+            user, pw = cred.split(":", 1)
+            from urllib.parse import quote, unquote
+            cred = user + ":" + quote(unquote(pw), safe="")
+        rest = cred + "@" + hostpart
+    return "postgresql://" + rest
+
+
+DATABASE_URL = _clean_db_url(os.environ.get("DATABASE_URL", ""))
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "5"))        # finished jobs per person per day (the admin is exempt)
 ALLOWED_ENV = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
 ALLOWED_DB: set = set()
@@ -1450,7 +1467,8 @@ def init_db():
         DB_OK, DB_STATUS = True, f"متصلة ✅ ({len(PREFS)} مستخدم محفوظ)"
         log.info("database connected: %d users, %d allowed", len(PREFS), len(ALLOWED_DB))
     except Exception as e:
-        DB_STATUS = f"فشل الاتصال ❌ ({type(e).__name__}: {str(e)[:120]}) - الحفظ في ملف مؤقت"
+        _m = str(e)[:120] if "://" not in str(e) else "(hidden)"
+        DB_STATUS = f"فشل الاتصال ❌ ({type(e).__name__}: {_m}) - الحفظ في ملف مؤقت"
         log.warning("database unavailable, using the local file: %s", str(e)[:200])
         log.warning("DATABASE_URL shape (password hidden): %s", _url_shape(DATABASE_URL))
 
