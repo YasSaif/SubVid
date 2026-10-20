@@ -733,7 +733,7 @@ async def probe(video: Path):
         [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries",
-            "stream=width,height:stream_tags=rotate:stream_side_data=rotation:format=duration",
+            "stream=width,height,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation:format=duration",
             "-of", "json", str(video),
         ],
         timeout=60,
@@ -741,6 +741,13 @@ async def probe(video: Path):
     info = json.loads(raw or b"{}")
     stream = (info.get("streams") or [{}])[0]
     w, h = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    try:  # non-square pixels: the real display width is width * SAR
+        sa, _, sb = str(stream.get("sample_aspect_ratio") or "1:1").partition(":")
+        sar = float(sa) / float(sb or 1)
+        if w and 0.2 < sar < 5 and abs(sar - 1) > 0.01:
+            w = int(w * sar)
+    except (ValueError, ZeroDivisionError):
+        pass
     rot = (stream.get("tags") or {}).get("rotate")
     for sd in stream.get("side_data_list") or []:
         if "rotation" in sd:
@@ -749,6 +756,36 @@ async def probe(video: Path):
         w, h = h, w
     duration = float((info.get("format") or {}).get("duration") or 0)
     return w, h, duration
+
+
+def out_size(w: int, h: int):
+    """Size of the burned video: short side = MAX_RES (same rule burn_subtitles uses)."""
+    short = min(w, h)
+    if short and short != MAX_RES:
+        f = MAX_RES / short
+        return int(w * f) // 2 * 2, int(h * f) // 2 * 2
+    return w // 2 * 2, h // 2 * 2
+
+
+def chars_per_line(w: int, h: int, job: dict) -> int:
+    """How many characters of the chosen font fit on one subtitle line, so lines never overflow the frame."""
+    ow, oh = out_size(w, h)
+    if not (ow and oh):
+        return 28
+    tgt = job["tgt"]
+    fonts = fonts_for(tgt)
+    font = fonts[job["font_i"] % len(fonts)]
+    group = "ar" if tgt in ARABIC_SCRIPT else "lat"
+    base = 12 if oh > ow else 21
+    px = base * SIZES[job["size_i"]][1] * font_scale(font, group) * oh / 288
+    avail = ow * (1 - 40 / 384)                     # side margins are 20 of 384 units each
+    if tgt in ARABIC_SCRIPT:
+        factor = 0.46
+    elif tgt in CJK:
+        factor = 1.0
+    else:
+        factor = 0.68 if font.startswith("DejaVu") else 0.6
+    return max(10, int(avail / (px * factor)))
 
 
 async def src_fps(video: Path) -> float:
@@ -763,12 +800,8 @@ async def src_fps(video: Path) -> float:
 
 async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict,
                          duration: float = 0.0, on_frac=None) -> Path:
-    scale = ""
-    short_side = min(w, h)
-    if short_side and short_side != MAX_RES:  # fixed output size: small sources are upscaled so the text stays sharp
-        f = MAX_RES / short_side
-        w, h = int(w * f) // 2 * 2, int(h * f) // 2 * 2
-        scale = f"scale={w}:{h},"
+    w, h = out_size(w, h)
+    scale = f"scale={w}:{h},setsar=1," if w and h else ""   # exact size + square pixels = same shape as the original
     portrait = h > w
 
     fonts = fonts_for(job["tgt"])
@@ -1008,8 +1041,7 @@ async def process(bot, chat_id: int, job: dict, status):
 
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
-            base_chars = 28 if portrait else 36
-            max_chars = max(14, int(base_chars / mult)) if mode == "sub" else 40
+            max_chars = chars_per_line(w, h, job) if mode == "sub" else 40
             cues = fix_overlaps(make_cues(segments, max_chars))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
@@ -1041,7 +1073,9 @@ async def process(bot, chat_id: int, job: dict, status):
                     caption = (f"{T(ui, 'caption_burn')}\n🌐 {LANGS.get(lang, lang)} ➜ {LANGS.get(tgt, tgt)}"
                                f" · ⏱ {elapsed}{T(ui, 'secs')}")
                     with open(out, "rb") as f:
-                        await bot.send_video(chat_id, f, supports_streaming=True, caption=caption)
+                        ow, oh = out_size(w, h)
+                        await bot.send_video(chat_id, f, supports_streaming=True, caption=caption,
+                                             width=ow or None, height=oh or None, duration=int(duration) or None)
                 st.mark("upload")
         try:
             await status.delete()
