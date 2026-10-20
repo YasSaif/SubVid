@@ -6,6 +6,7 @@ Pipeline: download -> audio (ffmpeg) -> transcribe (faster-whisper)
           -> translate (Google API / gtx / MyMemory) -> clean + wrap -> burn or send text.
 """
 import asyncio
+import base64
 import gc
 import json
 import logging
@@ -164,7 +165,7 @@ def fonts_for(tgt: str):
 STR = {
     "ar": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\nلتغيير لغة الواجهة: /language",
+        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\nلتغيير لغة الواجهة:\n/language",
         "send_media": "أرسل رابط فيديو أو ملف فيديو.",
         "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
         "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
@@ -189,6 +190,12 @@ STR = {
         "queued": "⏳ جاري التجهيز...",
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
         "proc_title": "⏳ جاري المعالجة...",
+        "bi": "ثنائية اللغة", "on": "مفعّلة", "off": "متوقفة",
+        "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
+        "gl_help": "📚 قاموسك الخاص (يصحّح الكلمات التي يخطئ فيها البوت)\n\nللإضافة اكتب كل كلمة في سطر:\n/glossary الكلمة الخطأ=الكلمة الصحيحة\n/glossary اسم_أو_مصطلح\n\nلحذف كلمة: /glossary del الكلمة\nلمسح الكل: /glossary clear",
+        "gl_list": "كلماتك المحفوظة", "gl_none": "القاموس فارغ.", "gl_added": "✅ تمت الإضافة", "gl_deleted": "🗑 تم الحذف", "gl_cleared": "🗑 تم مسح القاموس",
+        "card_title": "تم بنجاح", "card_from": "من", "card_to": "إلى", "card_len": "مدة المقطع",
+        "card_time": "وقت المعالجة", "card_count": "عدد الترجمات", "card_font": "الخط", "card_words": "الكلمات",
         "step_dl": "تحميل الفيديو", "step_audio": "استخراج الصوت", "step_tr": "تفريغ الكلام",
         "step_trans": "الترجمة", "step_burn": "دمج الترجمة بالفيديو", "step_up": "رفع الفيديو", "step_send": "إرسال النتيجة",
         "secs": "ث",
@@ -239,6 +246,12 @@ STR = {
         "queued": "⏳ Preparing...",
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
         "proc_title": "⏳ Processing...",
+        "bi": "Bilingual", "on": "On", "off": "Off",
+        "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
+        "gl_help": "📚 Your glossary (fixes words the bot gets wrong)\n\nAdd one entry per line:\n/glossary wrong word=correct word\n/glossary Name_or_term\n\nDelete: /glossary del word\nClear all: /glossary clear",
+        "gl_list": "Your saved terms", "gl_none": "The glossary is empty.", "gl_added": "✅ Added", "gl_deleted": "🗑 Deleted", "gl_cleared": "🗑 Glossary cleared",
+        "card_title": "Done", "card_from": "From", "card_to": "To", "card_len": "Clip length",
+        "card_time": "Processing time", "card_count": "Subtitles", "card_font": "Font", "card_words": "Words",
         "step_dl": "Downloading the video", "step_audio": "Extracting audio", "step_tr": "Transcribing speech",
         "step_trans": "Translating", "step_burn": "Burning subtitles", "step_up": "Uploading the video", "step_send": "Sending the result",
         "secs": "s",
@@ -320,15 +333,16 @@ def get_model() -> WhisperModel:
         return _model
 
 
-def _groq_asr(audio_path: str, model: str, language, detailed: bool):
+def _groq_asr(audio_path: str, model: str, language, detailed: bool, vocab: str = ""):
     with open(audio_path, "rb") as f:
         data = {"model": model, "response_format": "verbose_json", "temperature": "0"}
         if detailed:
             data["timestamp_granularities[]"] = ["word", "segment"]
         if language:
             data["language"] = language
-        if GROQ_PROMPT:
-            data["prompt"] = GROQ_PROMPT[:800]
+        hint = " ".join(x for x in (GROQ_PROMPT, vocab) if x)
+        if hint:
+            data["prompt"] = hint[:800]
         r = httpx.post(
             "https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
@@ -339,12 +353,12 @@ def _groq_asr(audio_path: str, model: str, language, detailed: bool):
     return r.json()
 
 
-def transcribe_groq(audio_path: str, language=None):
+def transcribe_groq(audio_path: str, language=None, vocab: str = ""):
     """Returns (segments, language, second_opinion_text). The second model is used later to recover words the first one dropped."""
     d, last = None, None
     for model in (GROQ_ASR_MODEL, GROQ_ASR_FALLBACK):
         try:
-            d = _groq_asr(audio_path, model, language, detailed=True)
+            d = _groq_asr(audio_path, model, language, detailed=True, vocab=vocab)
             used = model
             break
         except Exception as e:
@@ -356,7 +370,7 @@ def transcribe_groq(audio_path: str, language=None):
     other = GROQ_ASR_FALLBACK if used != GROQ_ASR_FALLBACK else GROQ_ASR_MODEL
     if other != used:
         try:
-            alt = _groq_asr(audio_path, other, language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower()), detailed=False).get("text", "").strip()
+            alt = _groq_asr(audio_path, other, language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower()), detailed=False, vocab=vocab).get("text", "").strip()
         except Exception as e:
             log.warning("Groq second-opinion ASR failed: %s", str(e)[:150])
     words = [(float(w["start"]), float(w["end"])) for w in d.get("words", []) if "start" in w]
@@ -375,11 +389,11 @@ def transcribe_groq(audio_path: str, language=None):
     return out, lang, alt
 
 
-def transcribe(audio_path: str, language=None):
+def transcribe(audio_path: str, language=None, vocab: str = ""):
     """language=None -> auto-detect; otherwise skip detection (faster)."""
     if GROQ_API_KEY:
         try:
-            return transcribe_groq(audio_path, language)
+            return transcribe_groq(audio_path, language, vocab)
         except Exception as e:
             log.warning("Groq transcription failed, using local Whisper: %s", str(e)[:150])
     segments, info = get_model().transcribe(
@@ -469,7 +483,7 @@ _LLM_MODELS = [m for m in dict.fromkeys([GROQ_LLM_MODEL, "openai/gpt-oss-120b", 
 _llm_bad: dict = {}   # model -> time until which it is skipped
 
 
-def _llm_batch(texts, src_name, tgt_name, fix_only, alt=""):
+def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
         "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
@@ -480,6 +494,9 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt=""):
         task += ("A second speech-recognition model transcribed the same audio as: \"" + alt[:1500] + "\". "
                  "Where the lines miss a word or phrase that the second transcript has and it fits the context, "
                  "put it back into the right line. ")
+    if gloss:
+        task += ("User glossary - always use exactly these terms/spellings (format: heard => correct): "
+                 + "; ".join(f"{a} => {b}" if a != b else a for a, b in list(gloss.items())[:40]) + ". ")
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
     else:
@@ -514,7 +531,7 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt=""):
     raise last or RuntimeError("no LLM model available")
 
 
-def translate_segments_llm(segments, src: str, tgt: str, alt: str = ""):
+def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=None):
     """Context-aware translation + correction via Groq. Raises on failure."""
     names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
     src_name, tgt_name = names.get(src, src), names.get(tgt, tgt)
@@ -524,7 +541,7 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = ""):
         batch = texts[i:i + 30]
         for attempt in range(2):
             try:
-                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "")
+                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "", gloss=gloss)
                 break
             except Exception:
                 if attempt == 1:
@@ -533,11 +550,11 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = ""):
     return [(s, e, r or t) for (s, e, _), r, t in zip(segments, result, texts)]
 
 
-def translate_segments(segments, src: str, tgt: str, alt: str = ""):
+def translate_segments(segments, src: str, tgt: str, alt: str = "", gloss=None):
     """Translate in a few small batches (one segment per line)."""
     if GROQ_API_KEY:
         try:
-            return translate_segments_llm(segments, src, tgt, alt)
+            return translate_segments_llm(segments, src, tgt, alt, gloss)
         except Exception as e:
             log.warning("Groq translation failed, using fallback chain: %s", str(e)[:150])
     if src == tgt:
@@ -640,13 +657,15 @@ def wrap2(line: str, max_chars: int) -> str:
     return f"{best[0]}\n{best[1]}" if best else line
 
 
-def make_cues(segments, max_chars: int):
-    """Split long segments into several timed cues of at most two short lines."""
+def make_cues(segments, max_chars: int, origs=None):
+    """Split long segments into several timed cues of at most two short lines.
+    origs (optional): original-language text per segment, added as small marked lines (\\x01) under the translation."""
     cues = []
-    for start, end, text in segments:
+    for idx, (start, end, text) in enumerate(segments):
         words = text.split()
         if not words:
             continue
+        ow = origs[idx].split() if origs and origs[idx] else []
         chunks, cur, n = [], [], 0
         for w in words:
             add = len(w) + (1 if cur else 0)
@@ -659,11 +678,19 @@ def make_cues(segments, max_chars: int):
         if cur:
             chunks.append(cur)
         total = sum(len(" ".join(c)) for c in chunks) or 1
-        t, dur = start, end - start
+        t, dur, cum = start, end - start, 0
         for c in chunks:
             line = " ".join(c)
             d = dur * len(line) / total
-            cues.append((t, t + d, wrap2(line, max_chars)))
+            txt = wrap2(line, max_chars)
+            if ow:
+                lo = round(len(ow) * cum / total)
+                cum += len(line)
+                hi = round(len(ow) * cum / total)
+                oline = " ".join(ow[lo:hi])
+                if oline:
+                    txt += "\n" + "\n".join("\x01" + x for x in wrap2(oline, int(max_chars * 1.4)).split("\n"))
+            cues.append((t, t + d, txt))
             t += d
     return cues
 
@@ -696,9 +723,11 @@ def srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def build_srt(cues) -> str:
+def build_srt(cues, keep_marks: bool = False) -> str:
     blocks = []
     for i, (start, end, text) in enumerate(cues, start=1):
+        if not keep_marks:
+            text = text.replace("\x01", "")
         blocks.append(f"{i}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
     return "\n".join(blocks)
 
@@ -833,8 +862,17 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     for block in src_srt.strip().split("\n\n"):
         lines = block.split("\n")
         if len(lines) >= 3:
-            if job["tgt"] in RTL_LANGS:   # keeps ". ، ! ( )" at the correct (left) end of right-to-left lines
-                lines[2:] = [ln + "\u200f" for ln in lines[2:]]
+            fixed = []
+            for ln in lines[2:]:
+                small = ln.startswith("\x01")
+                ln = ln.lstrip("\x01")
+                rtl = (job.get("lang") if small else job["tgt"]) in RTL_LANGS
+                if rtl:   # keeps ". ، ! ( )" at the correct (left) end of right-to-left lines
+                    ln += "\u200f"
+                if small:  # original-language line: smaller and softer
+                    ln = "{\\fs%d\\1c&H00D9D9D9&}" % max(5, round(font_size * 0.7)) + ln
+                fixed.append(ln)
+            lines[2:] = fixed
             lines[2] = "{\\an%d}" % align + lines[2]
         tagged.append("\n".join(lines))
     srt_name = "subs_burn.srt"
@@ -916,6 +954,316 @@ async def set_status(msg, text: str):
         pass
 
 
+LOGO_B64 = """
+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
+"""   # round bot logo (280px JPEG), used in the welcome picture and result cards
+
+
+# ------------------------------------------------- saved user settings + glossary
+PREFS_FILE = Path(os.environ.get("DATA_DIR", tempfile.gettempdir())) / "subvid_prefs.json"
+PREFS: dict = {}          # str(user id) -> {"ui","tgt","mode","font_i","size_i","style_i","pos_i","bi","gl":{wrong: right}}
+_prefs_lock = threading.Lock()
+
+
+def load_prefs():
+    try:
+        PREFS.update(json.loads(PREFS_FILE.read_text(encoding="utf-8")))
+        log.info("prefs loaded for %d users", len(PREFS))
+    except Exception:
+        pass
+
+
+def save_prefs():
+    try:
+        with _prefs_lock:
+            tmp = PREFS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(PREFS, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(PREFS_FILE)
+    except Exception as e:
+        log.warning("could not save prefs: %s", e)
+
+
+def uprefs(uid) -> dict:
+    return PREFS.setdefault(str(uid), {})
+
+
+def apply_glossary(segments, gl: dict):
+    """Replace known wrong spellings with the user's correct term (whole words only)."""
+    if not gl:
+        return segments
+    def rx(a):   # Latin terms: whole words; Arabic-script terms: may carry prefixes like بـ/ل/و/ال
+        e = re.escape(a)
+        return re.compile(e if _has_arabic(a) else r"(?<!\w)" + e + r"(?!\w)", re.I)
+    pats = [(rx(a), b) for a, b in gl.items() if a and a != b]
+    out = []
+    for st, en, t in segments:
+        for rx, b in pats:
+            t = rx.sub(lambda m, b=b: b, t)
+        out.append((st, en, t))
+    return out
+
+
+def parse_glossary(text: str) -> dict:
+    out = {}
+    for line in text.replace("،", "\n").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sep in ("=>", "->", "=", "←", "→"):
+            if sep in line:
+                a, b = (x.strip() for x in line.split(sep, 1))
+                break
+        else:
+            a = b = line
+        if a and b and len(a) <= 40 and len(b) <= 40:
+            out[a] = b
+    return out
+
+
 _alert_last: dict = {}
 
 
@@ -963,41 +1311,86 @@ def install_health_route():
 _BANNER: dict = {}   # "file_id" or "png"
 
 
-async def banner_png():
-    """Welcome picture drawn once with ffmpeg + libass (no extra libraries)."""
-    if "png" in _BANNER:
-        return _BANNER["png"]
-    W, H = 1280, 640
-    ass = (
-        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\n\n"
-        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        "Style: T,Noto Sans,120,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,4,0,1,0,0,5,0,0,0,1\n"
-        "Style: A,Noto Naskh Arabic,50,&H00F2E8D5,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1\n"
-        "Style: E,Noto Sans,30,&H00D8C9A8,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,1,0,1,0,0,5,0,0,0,1\n"
-        "Style: P,Noto Naskh Arabic,46,&H00FFFFFF,&H000000FF,&H90000000,&H90000000,1,0,0,0,100,100,0,0,3,14,0,5,0,0,0,1\n"
-        "Style: C,Noto Sans,24,&H00B7A98A,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,3,0,1,0,0,5,0,0,0,1\n\n"
-        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-        "Dialogue: 0,0:00:00.00,0:00:05.00,T,,0,0,0,,{\\pos(640,205)}SubVid Ai\n"
-        "Dialogue: 0,0:00:00.00,0:00:05.00,A,,0,0,0,,{\\pos(640,318)}ترجم فيديوهاتك وانقش الترجمة عليها في ثوانٍ\n"
-        "Dialogue: 0,0:00:00.00,0:00:05.00,E,,0,0,0,,{\\pos(640,378)}Translate videos and burn subtitles into them\n"
-        "Dialogue: 1,0:00:00.00,0:00:05.00,P,,0,0,0,,{\\pos(640,505)}السلام عليكم ورحمة الله\n"
-        "Dialogue: 0,0:00:00.00,0:00:05.00,C,,0,0,0,,{\\pos(640,590)}YOUTUBE   ·   TIKTOK   ·   MP4   ·   SRT\n"
-    )
-    workdir = Path(tempfile.mkdtemp(prefix="banner_"))
+def _esc(t) -> str:
+    return str(t).replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
+
+
+def _has_arabic(t: str) -> bool:
+    return any("\u0600" <= ch <= "\u06FF" for ch in t)
+
+
+def _fmt_time(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+async def _render_card(ass: str, logo_size: int, logo_x: int, logo_y: int, W: int = 1280, H: int = 720):
+    """gradient background + round logo + ASS text -> PNG bytes (or None)."""
+    workdir = Path(tempfile.mkdtemp(prefix="card_"))
     try:
-        (workdir / "b.ass").write_text(ass, encoding="utf-8")
-        for bg in (f"gradients=s={W}x{H}:c0=0x0a1d29:c1=0x1b6a66:x0=0:y0=0:x1={W}:y1={H}:d=1",
-                   f"color=c=0x12363d:s={W}x{H}:d=1"):
-            rc, _, _ = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg,
-                                          "-vf", "ass=b.ass", "-frames:v", "1", "b.png"], cwd=str(workdir))
-            if rc == 0 and (workdir / "b.png").exists():
-                _BANNER["png"] = (workdir / "b.png").read_bytes()
-                return _BANNER["png"]
+        (workdir / "c.ass").write_text(ass, encoding="utf-8")
+        (workdir / "logo.jpg").write_bytes(base64.b64decode("".join(LOGO_B64.split())))
+        fc = (f"[1:v]scale={logo_size}:{logo_size},format=gbrap,"
+              "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lt(hypot(X-W/2,Y-H/2),W/2-1),255,0)'[lg];"
+              f"[0:v][lg]overlay={logo_x}:{logo_y},ass=c.ass")
+        for bg in (f"gradients=s={W}x{H}:c0=0x050a14:c1=0x0c3558:x0=0:y0=0:x1={W}:y1={H}:d=1",
+                   f"color=c=0x081a2c:s={W}x{H}:d=1"):
+            rc, _, err = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg, "-i", "logo.jpg",
+                                            "-filter_complex", fc, "-frames:v", "1", "c.png"], cwd=str(workdir))
+            if rc == 0 and (workdir / "c.png").exists():
+                return (workdir / "c.png").read_bytes()
+        log.warning("card render failed: %s", err.decode(errors="ignore")[-200:])
         return None
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+_ASS_HEAD = (
+    "[Script Info]\nScriptType: v4.00+\nPlayResX: 1280\nPlayResY: 720\n\n"
+    "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+    "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+    "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    "Style: T,Noto Sans,170,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,3,0,1,0,0,5,0,0,0,1\n"
+    "Style: A,Noto Naskh Arabic,76,&H00F2D34A,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1\n"
+    "Style: P,Noto Naskh Arabic,62,&H00FFFFFF,&H000000FF,&H00100A06,&H00100A06,1,0,0,0,100,100,0,0,3,20,0,5,0,0,0,1\n"
+    "Style: D,Noto Sans,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1\n\n"
+    "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+)
+
+
+async def banner_png():
+    """Welcome picture (16:9): the bot's own logo, big simple text, bot colours."""
+    if "png" in _BANNER:
+        return _BANNER["png"]
+    ass = _ASS_HEAD + (
+        "Dialogue: 0,0:00:00.00,0:00:05.00,T,,0,0,0,,{\\pos(640,340)}SubVid Ai\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,A,,0,0,0,,{\\pos(640,465)}ترجم فيديوهاتك في ثوانٍ\n"
+        "Dialogue: 1,0:00:00.00,0:00:05.00,P,,0,0,0,,{\\pos(640,600)}السلام عليكم ورحمة الله\n"
+    )
+    png = await _render_card(ass, 230, 525, 22)
+    if png:
+        _BANNER["png"] = png
+    return png
+
+
+async def result_card(ui: str, rows: list):
+    """Closing card: logo, 'Done', and 6 label/value cells. rows = [(label, value), ...] (max 6)."""
+    rtl = ui == "ar"
+    label_font = "Noto Naskh Arabic" if rtl else "Noto Sans"
+    panel = "m 100 300 l 1180 300 l 1180 690 l 100 690"
+    ev = [
+        f"Dialogue: 0,0:00:00.00,0:00:05.00,D,,0,0,0,,{{\\an7\\pos(0,0)\\p1\\bord0\\1c&H00281406&\\1a&H40&}}{panel}{{\\p0}}",
+        f"Dialogue: 1,0:00:00.00,0:00:05.00,A,,0,0,0,,{{\\pos(640,235)\\1c&H0099D352&\\fs84\\fn{label_font}}}✓ {_esc(T(ui, 'card_title'))}",
+    ]
+    xs = [1130, 600] if rtl else [150, 680]
+    an = 6 if rtl else 4
+    for i, (label, value) in enumerate(rows[:6]):
+        col, row = i % 2, i // 2
+        y = 330 + row * 120
+        vfont = "Noto Naskh Arabic" if _has_arabic(str(value)) else "Noto Sans"
+        ev.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,D,,0,0,0,,{{\\an{an}\\pos({xs[col]},{y})\\fs32\\1c&H00C9B79A&\\fn{label_font}}}{_esc(label)}")
+        ev.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,D,,0,0,0,,{{\\an{an}\\pos({xs[col]},{y + 55})\\fs48\\b1\\fn{vfont}}}{_esc(value)}")
+    return await _render_card(_ASS_HEAD + "\n".join(ev) + "\n", 170, 555, 18)
 
 
 async def send_banner(msg):
@@ -1010,6 +1403,16 @@ async def send_banner(msg):
             _BANNER["file_id"] = sent.photo[-1].file_id   # next time Telegram reuses it: no upload
     except TelegramError as e:
         log.warning("banner not sent: %s", e)
+
+
+async def send_result_card(bot, chat_id, ui, rows):
+    """Never lets a decoration problem break a finished job."""
+    try:
+        png = await result_card(ui, rows)
+        if png:
+            await bot.send_photo(chat_id, photo=png)
+    except Exception as e:
+        log.warning("result card not sent: %s", e)
 
 
 class Progress:
@@ -1115,15 +1518,20 @@ async def process(bot, chat_id: int, job: dict, status):
             st.mark("audio")
 
             await prog.step("tr")
-            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"])
+            gl = PREFS.get(str(job.get("uid")), {}).get("gl", {}) if job.get("uid") else {}
+            vocab = ", ".join(dict.fromkeys(gl.values()))[:500]
+            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"], vocab)
             st.mark("transcribe")
             log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
                 raise UserError("no_speech")
 
+            segments = apply_glossary(segments, gl)
+            job["lang"] = lang
+            orig_texts = [" ".join(t.split()) for _, _, t in segments]
             if lang != tgt or GROQ_API_KEY:
                 await prog.step("trans")
-                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt)
+                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt, gl)
                 st.mark("translate")
 
             keep_joiners = tgt in ("fa", "ur")
@@ -1133,6 +1541,10 @@ async def process(bot, chat_id: int, job: dict, status):
                 segments = [(s, e, normalize_ar(t)) for s, e, t in segments]
                 log.info("subtitle text: odd chars before=[%s] after=[%s]", raw_odd,
                          odd_chars(" ".join(t for _, _, t in segments)))
+            origs = orig_texts if (job.get("bi") and mode == "sub" and lang != tgt and len(orig_texts) == len(segments)) else None
+            if origs:
+                keep = [i for i, x in enumerate(segments) if x[2]]
+                origs = [origs[i] for i in keep]
             segments = [x for x in segments if x[2]]
             if not segments:
                 raise UserError("no_speech")
@@ -1140,9 +1552,10 @@ async def process(bot, chat_id: int, job: dict, status):
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
             max_chars = chars_per_line(w, h, job) if mode == "sub" else 40
-            cues = fix_overlaps(make_cues(segments, max_chars))
+            cues = fix_overlaps(make_cues(segments, max_chars, origs))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
+            (workdir / "subs_tagged.srt").write_text(build_srt(cues, keep_marks=True), encoding="utf-8")
             plain = "\n".join(t for _, _, t in segments)
 
             if mode == "txt":
@@ -1157,9 +1570,13 @@ async def process(bot, chat_id: int, job: dict, status):
                     await bot.send_document(chat_id, f, filename="subtitles.srt",
                                             caption=T(ui, "caption_srt"))
                 st.mark("send")
+                await send_result_card(bot, chat_id, ui, [
+                    (T(ui, "card_from"), LANGS.get(lang, lang)), (T(ui, "card_to"), LANGS.get(tgt, tgt)),
+                    (T(ui, "card_len"), _fmt_time(duration)), (T(ui, "card_time"), _fmt_time(time.monotonic() - st.t0)),
+                    (T(ui, "card_count"), len(cues)), (T(ui, "card_words"), sum(len(t.split()) for _, _, t in segments))])
             else:
                 await prog.step("burn")
-                out = await burn_subtitles(video, "subs.srt", workdir, w, h, job, duration, prog.update)
+                out = await burn_subtitles(video, "subs_tagged.srt", workdir, w, h, job, duration, prog.update)
                 st.mark("burn")
                 if out.stat().st_size > TG_UPLOAD_LIMIT:
                     with open(workdir / "subs.srt", "rb") as f:
@@ -1187,6 +1604,11 @@ async def process(bot, chat_id: int, job: dict, status):
                             if tf:
                                 tf.close()
                 st.mark("upload")
+                fonts_used = fonts_for(tgt)
+                await send_result_card(bot, chat_id, ui, [
+                    (T(ui, "card_from"), LANGS.get(lang, lang)), (T(ui, "card_to"), LANGS.get(tgt, tgt)),
+                    (T(ui, "card_len"), _fmt_time(duration)), (T(ui, "card_time"), _fmt_time(time.monotonic() - st.t0)),
+                    (T(ui, "card_count"), len(cues)), (T(ui, "card_font"), fonts_used[job["font_i"] % len(fonts_used)])])
         try:
             await status.delete()
         except TelegramError:
@@ -1223,6 +1645,7 @@ def screen_src(job):
     rows = [
         [btn(T(ui, "src_auto"), f"src|{key}|auto")],
         [btn(T(ui, "src_manual"), f"src|{key}|pick")],
+        *([[btn(T(ui, "quick", tgt=LANGS.get(job["tgt"], job["tgt"])), f"qk|{key}")]] if job.get("saved") else []),
         [btn(T(ui, "cancel"), f"x|{key}")],
     ]
     return text, InlineKeyboardMarkup(rows)
@@ -1278,6 +1701,7 @@ def screen_settings(job):
         [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style"),
          btn(T(ui, "style_preview"), f"sp|{key}")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
+        [btn(f"🌐 {T(ui, 'bi')}: {T(ui, 'on' if job.get('bi') else 'off')}", f"cy|{key}|bi")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
     ]
@@ -1285,12 +1709,16 @@ def screen_settings(job):
 
 
 # ---------------------------------------------------------------- handlers
-def new_job(kind: str, data: str, ui: str) -> dict:
+def new_job(kind: str, data: str, ui: str, uid=None) -> dict:
     key = uuid.uuid4().hex[:10]
+    pr = PREFS.get(str(uid), {}) if uid else {}
     JOBS[key] = {
         "id": key, "kind": kind, "data": data, "ui": ui,
-        "src": None, "tgt": ui if ui in TARGETS else "ar", "mode": "sub",
-        "font_i": 0, "size_i": 1, "style_i": 0, "pos_i": 0,
+        "src": None, "tgt": pr.get("tgt") if pr.get("tgt") in TARGETS else (ui if ui in TARGETS else "ar"),
+        "mode": pr.get("mode", "sub"), "uid": uid,
+        "font_i": int(pr.get("font_i", 0)), "size_i": min(int(pr.get("size_i", 1)), len(SIZES) - 1),
+        "style_i": min(int(pr.get("style_i", 0)), len(STYLES) - 1), "pos_i": min(int(pr.get("pos_i", 0)), len(POSITIONS) - 1),
+        "bi": bool(pr.get("bi", False)), "saved": bool(pr.get("tgt")),
     }
     while len(JOBS) > 300:
         JOBS.popitem(last=False)
@@ -1304,9 +1732,49 @@ async def safe_edit(q, text, markup=None):
         log.debug("edit skipped: %s", e)
 
 
+def get_ui(context, user):
+    ui = context.user_data.get("ui")
+    if not ui and user:
+        ui = PREFS.get(str(user.id), {}).get("ui")
+        if ui in STR:
+            context.user_data["ui"] = ui
+        else:
+            ui = None
+    return ui
+
+
+async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, user = update.effective_message, update.effective_user
+    ui = get_ui(context, user) or "ar"
+    pr = uprefs(user.id)
+    gl = pr.setdefault("gl", {})
+    body = (msg.text or "").split(None, 1)
+    arg = body[1].strip() if len(body) > 1 else ""
+    if arg.lower() == "clear":
+        gl.clear()
+        save_prefs()
+        await msg.reply_text(T(ui, "gl_cleared"))
+        return
+    if arg.lower().startswith("del "):
+        gl.pop(arg[4:].strip(), None)
+        save_prefs()
+        await msg.reply_text(T(ui, "gl_deleted"))
+        return
+    if arg:
+        new = parse_glossary(arg)
+        for a, b in new.items():
+            if len(gl) < 60 or a in gl:
+                gl[a] = b
+        save_prefs()
+        await msg.reply_text(f"{T(ui, 'gl_added')} ({len(new)})")
+        return
+    listing = "\n".join(f"• {a} ⇢ {b}" if a != b else f"• {a}" for a, b in gl.items()) or T(ui, "gl_none")
+    await msg.reply_text(f"{T(ui, 'gl_help')}\n\n{T(ui, 'gl_list')}:\n{listing}")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    ui = context.user_data.get("ui")
+    ui = get_ui(context, update.effective_user)
     await send_banner(msg)
     if not ui:
         text, markup = screen_ui_picker()
@@ -1332,7 +1800,7 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m:
             kind, data = "url", m.group(0)
 
-    ui = context.user_data.get("ui")
+    ui = get_ui(context, update.effective_user)
     if not kind:
         await msg.reply_text(T(ui or "ar", "send_media"))
         return
@@ -1342,13 +1810,16 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, reply_markup=markup)
         return
 
-    job = new_job(kind, data, ui)
+    job = new_job(kind, data, ui, update.effective_user.id)
     text, markup = screen_src(job)
     await msg.reply_text(text, reply_markup=markup)
 
 
 async def begin(context, q, job):
     JOBS.pop(job["id"], None)
+    if job.get("uid"):
+        uprefs(job["uid"]).update({k: job[k] for k in ("tgt", "mode", "font_i", "size_i", "style_i", "pos_i", "bi")})
+        save_prefs()
     await safe_edit(q, T(job["ui"], "queued"))
     context.application.create_task(process(context.bot, q.message.chat_id, job, q.message))
 
@@ -1365,9 +1836,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if act == "ui":
         ui = parts[1] if len(parts) > 1 and parts[1] in STR else "ar"
         context.user_data["ui"] = ui
+        uprefs(q.from_user.id)["ui"] = ui
+        save_prefs()
         pending = context.user_data.pop("pending", None)
         if pending:
-            job = new_job(pending[0], pending[1], ui)
+            job = new_job(pending[0], pending[1], ui, q.from_user.id)
             text, markup = screen_src(job)
             await safe_edit(q, text, markup)
         else:
@@ -1424,6 +1897,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job["style_i"] = (job["style_i"] + 1) % len(STYLES)
         elif field == "pos":
             job["pos_i"] = (job["pos_i"] + 1) % len(POSITIONS)
+        elif field == "bi":
+            job["bi"] = not job.get("bi")
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
     elif act == "fp":
@@ -1438,6 +1913,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if png:
             await context.bot.send_photo(q.message.chat_id, photo=png, caption=T(ui, "style_preview_cap"))
     elif act == "go":
+        await begin(context, q, job)
+    elif act == "qk":
+        job["src"] = None
         await begin(context, q, job)
 
 
@@ -1709,6 +2187,7 @@ def main():
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("fonttest", cmd_fonttest))
+    app.add_handler(CommandHandler("glossary", cmd_glossary))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(
@@ -1719,12 +2198,13 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
     if WEBHOOK_URL:
         install_health_route()
+        load_prefs()
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
