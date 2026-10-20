@@ -25,7 +25,7 @@ from pathlib import Path
 import httpx
 import yt_dlp
 from faster_whisper import WhisperModel
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
@@ -197,7 +197,7 @@ STR = {
         "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
         "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
         "retry": "🔄 إعادة المحاولة",
-        "preview": "👁 معاينة شاملة", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
+        "preview": "👁 معاينة مباشرة", "preview_all": "🔤 كل الخطوط والأنماط", "live_cap": "👁 معاينة مباشرة — تتحدث تلقائيًا مع كل تغيير في الخط أو الحجم أو النمط أو المكان أو الثنائية", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
         "pv_fonts": "الخطوط", "pv_sizes": "الأحجام", "pv_styles": "الأنماط", "pv_pos": "المكان", "pv_bi": "ثنائية اللغة",
         "pv_bi_note": "تظهر الترجمة وتحتها اللغة الثانية بخط أصغر. تختار اللغة الثانية من بين كل اللغات (أو تتركها «اللغة الأصلية» للفيديو).", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
@@ -264,7 +264,7 @@ STR = {
         "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
         "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
         "retry": "🔄 Try again",
-        "preview": "👁 Full preview", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
+        "preview": "👁 Live preview", "preview_all": "🔤 All fonts & styles", "live_cap": "👁 Live preview — updates automatically whenever you change font, size, style, position or bilingual", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
         "pv_fonts": "Fonts", "pv_sizes": "Sizes", "pv_styles": "Styles", "pv_pos": "Position", "pv_bi": "Bilingual",
         "pv_bi_note": "The translation is shown with the second language below it in a smaller font. You pick the second language from all languages (or keep the video\'s original language).", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
@@ -2203,7 +2203,7 @@ def screen_settings(job):
         [btn(f"{T(ui, 'style')}: {T(ui, 'style_' + STYLES[job['style_i']])}", f"cy|{key}|style")],
         [btn(f"{T(ui, 'pos')}: {T(ui, POSITIONS[job['pos_i']][0])}", f"cy|{key}|pos")],
         [btn(f"🌐 {T(ui, 'bi')}: {bi_label(job)}", f"bi|{key}")],
-        [btn(T(ui, "preview"), f"sp|{key}")],
+        [btn(T(ui, "preview"), f"sp|{key}"), btn(T(ui, "preview_all"), f"fp|{key}")],
         [btn(T(ui, "start"), f"go|{key}")],
         [btn(T(ui, "cancel"), f"x|{key}")],
     ]
@@ -2409,6 +2409,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         job["bi"] = False if v == "off" else "src" if v == "src" else (v if v in LANGS else False)
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
+        await live_preview(context, q.message.chat_id, job)
     elif act == "bk":
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
@@ -2426,7 +2427,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job["bi"] = not job.get("bi")
         text, markup = screen_settings(job)
         await safe_edit(q, text, markup)
-    elif act in ("fp", "sp"):
+        await live_preview(context, q.message.chat_id, job)
+    elif act == "sp":
+        await live_preview(context, q.message.chat_id, job, force_new=True)
+    elif act == "fp":
         group = "ar" if job["tgt"] in ARABIC_SCRIPT else "lat"
         fonts = fonts_for(job["tgt"])
         png = await combo_preview(group, fonts[job["font_i"] % len(fonts)], ui)
@@ -2437,6 +2441,97 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif act == "qk":
         job["src"] = None
         await begin(context, q, job)
+
+
+_LIVE_CACHE: dict = {}
+LIVE_SAMPLES = {"ar": ("مرحبا، كيف حالك؟", "ar"), "lat": ("Hello, how are you?", "lat")}
+
+
+async def live_frame(job: dict):
+    """One video-like frame showing the subtitle exactly as chosen (font, size, style, position, bilingual)."""
+    tgt = job["tgt"]
+    group = "ar" if tgt in ARABIC_SCRIPT else "lat"
+    fonts = fonts_for(tgt)
+    font = fonts[job["font_i"] % len(fonts)]
+    bi = job.get("bi")
+    sec_group = None
+    if bi:
+        other = bi if bi not in (True, "src") else (job.get("src") or None)
+        if other == tgt:
+            sec_group = None
+        elif other:
+            sec_group = "ar" if other in ARABIC_SCRIPT else "lat"
+        else:
+            sec_group = "lat" if group == "ar" else "ar"
+    key = (group, font, job["size_i"], job["style_i"], job["pos_i"], sec_group)
+    if key in _LIVE_CACHE:
+        return _LIVE_CACHE[key]
+    W, H = 720, 900
+    main = LIVE_SAMPLES[group][0]
+    mult = SIZES[job["size_i"]][1]
+    fs = round(34 * mult * font_scale(font, group))
+    style_key = STYLES[job["style_i"] % len(STYLES)]
+    an_pos = POSITIONS[job["pos_i"] % len(POSITIONS)][0]
+    ycen = {"pos_top": 170, "pos_middle": H // 2, "pos_bottom": H - 190}[an_pos]
+    if sec_group:
+        ycen -= round(fs * 0.5) if an_pos != "pos_top" else 0
+    style = _ass_style_line("M", font, fs, STYLE_DEFS[style_key])
+    ev = [f"Dialogue: 1,0:00:00.00,0:00:05.00,M,,0,0,0,,{{\\an5\\pos({W // 2},{ycen})}}{main}"]
+    if sec_group:
+        sec = LIVE_SAMPLES[sec_group][0]
+        sfont = "Noto Naskh Arabic" if sec_group == "ar" else "Noto Sans"
+        sfs = round(fs * 0.7 * 1.15 / 0.9)
+        ev.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,M,,0,0,0,,{{\\an5\\pos({W // 2},{ycen + round(fs * 1.25)})\\fn{sfont}\\fs{sfs}\\1c&H00D9D9D9&}}{sec}")
+    ass = (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\nWrapStyle: 2\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n" + style
+        + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(ev) + "\n"
+    )
+    workdir = Path(tempfile.mkdtemp(prefix="live_"))
+    try:
+        (workdir / "p.ass").write_text(ass, encoding="utf-8")
+        for bg in (f"gradients=s={W}x{H}:c0=0x2b5876:c1=0xc9a27a:x0=0:y0=0:x1={W}:y1={H}:d=1",
+                   f"color=c=0x5a6b7b:s={W}x{H}:d=1"):
+            rc, _, err = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg,
+                                            "-vf", "ass=p.ass", "-frames:v", "1", "p.png"], cwd=str(workdir))
+            if rc == 0 and (workdir / "p.png").exists():
+                png = (workdir / "p.png").read_bytes()
+                if len(_LIVE_CACHE) > 200:
+                    _LIVE_CACHE.clear()
+                _LIVE_CACHE[key] = png
+                return png
+        log.warning("live preview failed: %s", err.decode(errors="ignore")[-200:])
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def live_preview(context, chat_id, job, force_new=False):
+    """Show/refresh the live preview photo. Once it exists it is edited in place after each change."""
+    if not force_new and not job.get("pv"):
+        return
+    png = await live_frame(job)
+    if not png:
+        return
+    ui = job["ui"]
+    mid = job.get("pv")
+    if mid and not force_new:
+        try:
+            await context.bot.edit_message_media(chat_id=chat_id, message_id=mid,
+                                                 media=InputMediaPhoto(png, caption=T(ui, "live_cap")))
+            return
+        except TelegramError as e:
+            log.debug("live edit failed: %s", e)
+    if mid:
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except TelegramError:
+            pass
+    sent = await context.bot.send_photo(chat_id, photo=png, caption=T(ui, "live_cap"))
+    job["pv"] = sent.message_id
 
 
 _COMBO_CACHE: dict = {}
