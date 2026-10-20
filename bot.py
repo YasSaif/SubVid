@@ -192,6 +192,11 @@ STR = {
         "queued": "⏳ جاري التجهيز...",
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
         "proc_title": "⏳ جاري المعالجة...",
+        "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
+        "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
+        "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
+        "tx_mismatch": "عدد المقاطع في النص ({n}) لا يطابق الأصل ({m}). أبقِ نفس الترقيم، أو أرسل SRT بتوقيتك.",
+        "caption_edit": "✅ تم تطبيق تعديلاتك.",
         "bi": "ثنائية اللغة", "on": "مفعّلة", "off": "متوقفة",
         "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
         "gl_help": "📚 قاموسك الخاص (يصحّح الكلمات التي يخطئ فيها البوت)\n\nللإضافة اكتب كل كلمة في سطر:\n/glossary الكلمة الخطأ=الكلمة الصحيحة\n/glossary اسم_أو_مصطلح\n\nلحذف كلمة: /glossary del الكلمة\nلمسح الكل: /glossary clear",
@@ -248,6 +253,11 @@ STR = {
         "queued": "⏳ Preparing...",
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
         "proc_title": "⏳ Processing...",
+        "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
+        "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
+        "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
+        "tx_mismatch": "The text has {n} entries but the original has {m}. Keep the same numbering, or send an SRT with timing.",
+        "caption_edit": "✅ Your edits were applied.",
         "bi": "Bilingual", "on": "On", "off": "Off",
         "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
         "gl_help": "📚 Your glossary (fixes words the bot gets wrong)\n\nAdd one entry per line:\n/glossary wrong word=correct word\n/glossary Name_or_term\n\nDelete: /glossary del word\nClear all: /glossary clear",
@@ -1418,12 +1428,177 @@ async def send_result_card(bot, chat_id, ui, rows):
         log.warning("result card not sent: %s", e)
 
 
+# --------------------------------------------- export / edit / re-burn text
+KEPT: dict = {}            # job id -> saved result (video + subtitles) so the user can edit the text and re-burn
+KEPT_TTL = 2 * 3600
+KEPT_MAX = 3
+
+
+def _drop_kept(jid):
+    st = KEPT.pop(jid, None)
+    if st:
+        shutil.rmtree(st["dir"], ignore_errors=True)
+
+
+def keep_state(job, workdir, video, w, h, duration, cues, lang, chat_id) -> bool:
+    now = time.time()
+    for jid, st in list(KEPT.items()):
+        if now - st["ts"] > KEPT_TTL or st["chat"] == chat_id:
+            _drop_kept(jid)
+    while len(KEPT) >= KEPT_MAX:
+        _drop_kept(min(KEPT, key=lambda k: KEPT[k]["ts"]))
+    KEPT[job["id"]] = {"dir": workdir, "video": video, "job": dict(job), "w": w, "h": h, "duration": duration,
+                       "cues": cues, "lang": lang, "chat": chat_id, "ts": now}
+    return True
+
+
+def latest_kept(chat_id):
+    now = time.time()
+    for jid, st in list(KEPT.items()):
+        if now - st["ts"] > KEPT_TTL:
+            _drop_kept(jid)
+    mine = [(st["ts"], jid) for jid, st in KEPT.items() if st["chat"] == chat_id]
+    return max(mine)[1] if mine else None
+
+
+async def offer_text_edit(bot, chat_id, ui, jid):
+    try:
+        await bot.send_message(chat_id, T(ui, "tx_offer"),
+                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(T(ui, "tx_btn"), callback_data=f"tx|{jid}")]]))
+    except Exception as e:
+        log.warning("edit offer not sent: %s", e)
+
+
+def export_text(cues) -> str:
+    return "\n\n".join(f"{i}\n" + "\n".join(ln for ln in t.split("\n") if not ln.startswith("\x01"))
+                        for i, (_, _, t) in enumerate(cues, 1))
+
+
+_TIME_RE = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+
+
+def parse_edit(text: str):
+    """Numbered blocks (optionally with SRT times) -> [(start|None, end|None, text)]."""
+    out = []
+    for block in re.split(r"\n\s*\n", text.replace("\r", "").strip("\ufeff\n ")):
+        lines = [ln.rstrip() for ln in block.split("\n") if ln.strip() != ""]
+        if not lines:
+            continue
+        if lines[0].strip().isdigit():
+            lines = lines[1:]
+        start = end = None
+        if lines and (m := _TIME_RE.search(lines[0])):
+            g = [int(x.ljust(3, "0")[:3]) if i in (3, 7) else int(x) for i, x in enumerate(m.groups())]
+            start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
+            end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
+            lines = lines[1:]
+        if lines:
+            out.append((start, end, "\n".join(lines)))
+    return out
+
+
+async def send_export(bot, chat_id, ui, jid):
+    st = KEPT.get(jid)
+    if not st or st["chat"] != chat_id:
+        await bot.send_message(chat_id, T(ui, "tx_expired"))
+        return
+    st["ts"] = time.time()
+    body = export_text(st["cues"])
+    if len(body) <= 3500:
+        await bot.send_message(chat_id, body)
+    path = st["dir"] / "subtitles_edit.txt"
+    path.write_text(body, encoding="utf-8")
+    with open(path, "rb") as f:
+        await bot.send_document(chat_id, f, filename="subtitles.txt", caption=T(ui, "tx_how"))
+
+
+async def apply_edit(msg, ui, text: str):
+    chat_id = msg.chat_id
+    jid = latest_kept(chat_id)
+    if not jid:
+        await msg.reply_text(T(ui, "tx_expired"))
+        return
+    st = KEPT[jid]
+    edits = parse_edit(text)
+    old = st["cues"]
+    if not edits:
+        await msg.reply_text(T(ui, "send_media"))
+        return
+    max_chars = chars_per_line(st["w"], st["h"], st["job"])
+    if all(a is not None for a, _, _ in edits):          # full SRT with its own timing
+        cues = [(a, b, t if "\n" in t else wrap2(t, max_chars)) for a, b, t in edits]
+    elif len(edits) == len(old):                          # same numbering: keep the original timing
+        cues = []
+        for (a, b, oldt), (_, _, t) in zip(old, edits):
+            small = [ln for ln in oldt.split("\n") if ln.startswith("\x01")]   # keep the bilingual original lines
+            t = t if "\n" in t else wrap2(t, max_chars)
+            cues.append((a, b, "\n".join([t] + small)))
+    else:
+        await msg.reply_text(T(ui, "tx_mismatch", n=len(edits), m=len(old)))
+        return
+    status = await msg.reply_text(T(ui, "queued"))
+    asyncio.get_running_loop().create_task(reburn(msg.get_bot(), chat_id, jid, cues, status))
+
+
+async def reburn(bot, chat_id, jid, cues, status):
+    st = KEPT.get(jid)
+    if not st:
+        await set_status(status, T("ar", "tx_expired"))
+        return
+    job, ui = st["job"], st["job"]["ui"]
+    prog = Progress(ui, status, "rb")
+    try:
+        async with JOB_SEM:
+            wd = st["dir"]
+            fixed = fix_overlaps(cues)
+            (wd / "subs.srt").write_text(build_srt(fixed), encoding="utf-8")
+            (wd / "subs_tagged.srt").write_text(build_srt(fixed, keep_marks=True), encoding="utf-8")
+            await prog.step("burn")
+            out = await burn_subtitles(st["video"], "subs_tagged.srt", wd, st["w"], st["h"], job, st["duration"], prog.update)
+            if out.stat().st_size > TG_UPLOAD_LIMIT:
+                with open(wd / "subs.srt", "rb") as f:
+                    await bot.send_document(chat_id, f, filename="subtitles.srt", caption=T(ui, "too_big"))
+            else:
+                await prog.step("up")
+                thumb = wd / "thumb.jpg"
+                try:
+                    await run_cmd(["ffmpeg", "-y", "-ss", str(min(1.0, (st["duration"] or 2) / 2)), "-i", str(out),
+                                   "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(thumb)], timeout=60)
+                except Exception:
+                    thumb = None
+                ow, oh = out_size(st["w"], st["h"])
+                with open(out, "rb") as f:
+                    tf = open(thumb, "rb") if thumb and thumb.exists() else None
+                    try:
+                        await bot.send_video(chat_id, f, supports_streaming=True, caption=T(ui, "caption_edit"),
+                                             width=ow or None, height=oh or None, duration=int(st["duration"]) or None,
+                                             thumbnail=tf)
+                    finally:
+                        if tf:
+                            tf.close()
+            st["cues"], st["ts"] = fixed, time.time()
+        try:
+            await status.delete()
+        except TelegramError:
+            pass
+        await offer_text_edit(bot, chat_id, ui, jid)
+    except UserError as e:
+        await set_status(status, "⚠️ " + T(ui, e.key, **e.kw))
+    except Exception as e:
+        log.exception("re-burn failed")
+        await set_status(status, "❌ " + T(ui, "generic"))
+        await notify_admin(bot, f"❌ فشل إعادة الدمج {jid}\nالخطأ: {type(e).__name__}: {str(e)[:300]}", key="reburn")
+    finally:
+        gc.collect()
+
+
 class Progress:
     """One status message that shows a checklist (and a bar while burning). Edits are throttled."""
 
     def __init__(self, ui, msg, mode):
         self.ui, self.msg = ui, msg
-        self.steps = (["dl", "audio", "tr", "trans", "burn", "up"] if mode == "sub"
+        self.steps = (["burn", "up"] if mode == "rb" else
+                      ["dl", "audio", "tr", "trans", "burn", "up"] if mode == "sub"
                       else ["dl", "audio", "tr", "trans", "send"])
         self.cur, self.frac, self.last = None, None, 0.0
 
@@ -1494,6 +1669,7 @@ async def process(bot, chat_id: int, job: dict, status):
     workdir = Path(tempfile.mkdtemp(prefix="subvid_"))
     st = Stages()
     prog = Progress(ui, status, mode)
+    kept = False
     PENDING.append(job["id"])
     try:
         ahead = PENDING.index(job["id"])
@@ -1611,11 +1787,15 @@ async def process(bot, chat_id: int, job: dict, status):
                             if tf:
                                 tf.close()
                 st.mark("upload")
+                if out.stat().st_size <= TG_UPLOAD_LIMIT:
+                    kept = keep_state(job, workdir, video, w, h, duration, cues, lang, chat_id)
                 fonts_used = fonts_for(tgt)
                 await send_result_card(bot, chat_id, ui, [
                     (T(ui, "card_from"), LANGS.get(lang, lang)), (T(ui, "card_to"), LANGS.get(tgt, tgt)),
                     (T(ui, "card_len"), _fmt_time(duration)), (T(ui, "card_time"), _fmt_time(time.monotonic() - st.t0)),
                     (T(ui, "card_count"), len(cues)), (T(ui, "card_font"), fonts_used[job["font_i"] % len(fonts_used)])])
+                if kept:
+                    await offer_text_edit(bot, chat_id, ui, job["id"])
         try:
             await status.delete()
         except TelegramError:
@@ -1632,7 +1812,8 @@ async def process(bot, chat_id: int, job: dict, status):
                  tgt, mode, st.summary())
         if job["id"] in PENDING:
             PENDING.remove(job["id"])
-        shutil.rmtree(workdir, ignore_errors=True)
+        if not kept:
+            shutil.rmtree(workdir, ignore_errors=True)
         gc.collect()
 
 
@@ -1802,10 +1983,20 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind, data = "file", msg.video.file_id
     elif msg.document and (msg.document.mime_type or "").startswith("video/"):
         kind, data = "file", msg.document.file_id
+    elif msg.document and (msg.document.file_name or "").lower().endswith((".txt", ".srt")):
+        ui = get_ui(context, update.effective_user) or "ar"
+        if msg.document.file_size and msg.document.file_size > 2_000_000:
+            return
+        raw = await (await msg.get_bot().get_file(msg.document.file_id)).download_as_bytearray()
+        await apply_edit(msg, ui, bytes(raw).decode("utf-8-sig", errors="replace"))
+        return
     elif msg.text:
         m = URL_RE.search(msg.text)
         if m:
             kind, data = "url", m.group(0)
+        elif latest_kept(msg.chat_id) and msg.text.lstrip()[:1].isdigit():
+            await apply_edit(msg, get_ui(context, update.effective_user) or "ar", msg.text)
+            return
 
     ui = get_ui(context, update.effective_user)
     if not kind:
@@ -1852,6 +2043,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q, text, markup)
         else:
             await safe_edit(q, T(ui, "welcome"))
+        return
+
+    if act == "tx":
+        await send_export(context.bot, q.message.chat_id, context.user_data.get("ui") or "ar", parts[1] if len(parts) > 1 else "")
         return
 
     key = parts[1] if len(parts) > 1 else ""
@@ -2200,12 +2395,13 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
-            & ((filters.TEXT & ~filters.COMMAND) | filters.VIDEO | filters.Document.VIDEO),
+            & ((filters.TEXT & ~filters.COMMAND) | filters.VIDEO | filters.Document.VIDEO
+               | filters.Document.FileExtension("txt") | filters.Document.FileExtension("srt")),
             on_input,
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
