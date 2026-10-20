@@ -1,10 +1,10 @@
 #!/bin/bash
 # SubVid Ai - one-shot setup for an Ubuntu server (Oracle Cloud "Cloud-init script" box).
-# Fill the 4 values between the quotes below, nothing else. Do NOT share this filled-in text with anyone.
-TOKEN="PUT_BOT_TOKEN_HERE"
-GROQ_API_KEY="PUT_GROQ_KEY_HERE"
-ADMIN_ID="PUT_YOUR_TELEGRAM_NUMERIC_ID_HERE"
-DATABASE_URL="PUT_SUPABASE_SESSION_POOLER_URL_HERE"
+# Replace only the PUT_..._HERE texts between the single quotes, keep the quotes. Do NOT share this filled-in text with anyone.
+TOKEN='PUT_BOT_TOKEN_HERE'
+GROQ_API_KEY='PUT_GROQ_KEY_HERE'
+ADMIN_ID='964933763'
+DATABASE_URL='PUT_SUPABASE_SESSION_POOLER_URL_HERE'
 
 exec > /var/log/subvid-setup.log 2>&1
 set -x
