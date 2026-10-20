@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from collections import OrderedDict
 from pathlib import Path
@@ -44,8 +45,14 @@ WEBHOOK_URL = (
     or ""
 ).rstrip("/")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
+MAX_RES = int(os.environ.get("MAX_RES", "480"))  # max size of the SMALLER video side (480 = 480x854 portrait)
+USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (saves RAM, may add noise text)
+WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
 MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
+GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
+GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
 TG_UPLOAD_LIMIT = 49 * 1024 * 1024  # Bot API upload limit is 50 MB
 
@@ -94,8 +101,11 @@ def ordered(codes, first):
 
 # ----------------------------------------------------------------- styles
 FONTS_AR = ["Noto Sans Arabic", "Noto Naskh Arabic", "Noto Kufi Arabic", "Amiri"]
+CANDIDATES_AR_ALL = list(FONTS_AR)
+if os.environ.get("ENABLE_KUFI") != "1":   # Kufi renders as empty boxes in burned video on this server
+    FONTS_AR.remove("Noto Kufi Arabic")
 FONTS_LAT = ["Noto Sans", "Noto Serif"]
-CANDIDATES_AR = list(FONTS_AR)   # everything we would like to offer
+CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
 SIZES = [("size_s", 0.8), ("size_m", 1.0), ("size_l", 1.3)]
 STYLES = ["classic", "box", "yellow"]
@@ -251,16 +261,39 @@ def get_model() -> WhisperModel:
     with _model_lock:
         if _model is None:
             log.info("Loading Whisper model: %s", WHISPER_MODEL)
-            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=2, num_workers=1)
+            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS, num_workers=1)
         return _model
+
+
+def transcribe_groq(audio_path: str, language=None):
+    with open(audio_path, "rb") as f:
+        data = {"model": GROQ_ASR_MODEL, "response_format": "verbose_json", "temperature": "0"}
+        if language:
+            data["language"] = language
+        r = httpx.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            data=data, files={"file": ("audio.wav", f, "audio/wav")}, timeout=120,
+        )
+    r.raise_for_status()
+    d = r.json()
+    out = [(float(x["start"]), float(x["end"]), x["text"].strip())
+           for x in d.get("segments", []) if x.get("text", "").strip()]
+    lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
+    return out, lang
 
 
 def transcribe(audio_path: str, language=None):
     """language=None -> auto-detect; otherwise skip detection (faster)."""
+    if GROQ_API_KEY:
+        try:
+            return transcribe_groq(audio_path, language)
+        except Exception as e:
+            log.warning("Groq transcription failed, using local Whisper: %s", str(e)[:150])
     segments, info = get_model().transcribe(
         audio_path,
         beam_size=1,
-        vad_filter=True,
+        vad_filter=USE_VAD,
         condition_on_previous_text=False,
         language=language,
     )
@@ -331,8 +364,71 @@ def _translate_text(text: str, src: str, tgt: str) -> str:
     raise RuntimeError("all translation providers failed")
 
 
+LANG_NAME_TO_CODE = {
+    "arabic": "ar", "english": "en", "french": "fr", "spanish": "es", "german": "de", "turkish": "tr",
+    "persian": "fa", "urdu": "ur", "hindi": "hi", "russian": "ru", "italian": "it", "portuguese": "pt",
+    "indonesian": "id", "chinese": "zh", "japanese": "ja", "korean": "ko", "dutch": "nl", "polish": "pl",
+    "bengali": "bn", "swahili": "sw", "hebrew": "he", "ukrainian": "uk", "greek": "el", "thai": "th",
+    "vietnamese": "vi", "malay": "ms", "swedish": "sv", "romanian": "ro", "czech": "cs", "somali": "so",
+}
+
+
+def _llm_batch(texts, src_name, tgt_name, fix_only):
+    task = (
+        f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
+        "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
+    )
+    if fix_only:
+        task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
+    else:
+        task += (f"First fix obvious mistakes using the context, then translate each line into natural, "
+                 f"fluent {tgt_name}, as a native speaker would say it. Keep proper names correct.")
+    task += (' Return JSON {"t": [...]} with EXACTLY the same number of items, in the same order, '
+             "one output string per input line. No explanations.")
+    r = httpx.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        json={"model": GROQ_LLM_MODEL, "temperature": 0.2, "response_format": {"type": "json_object"},
+              "messages": [{"role": "system", "content": task},
+                           {"role": "user", "content": json.dumps({"lines": texts}, ensure_ascii=False)}]},
+        timeout=60,
+    )
+    r.raise_for_status()
+    out = json.loads(r.json()["choices"][0]["message"]["content"])["t"]
+    if not isinstance(out, list) or len(out) != len(texts):
+        raise ValueError("line count mismatch")
+    return [str(x).strip() for x in out]
+
+
+def translate_segments_llm(segments, src: str, tgt: str):
+    """Context-aware translation + correction via Groq (Llama). Raises on failure."""
+    names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
+    src_name, tgt_name = names.get(src, src), names.get(tgt, tgt)
+    texts = [" ".join(t.split()) for _, _, t in segments]
+    result = []
+    for i in range(0, len(texts), 30):
+        batch = texts[i:i + 30]
+        for attempt in range(2):
+            try:
+                result += _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt))
+                break
+            except Exception as e:
+                if attempt == 1:
+                    raise
+                log.warning("LLM batch failed, retrying: %s", str(e)[:120])
+                time.sleep(2)
+    return [(s, e, r or t) for (s, e, _), r, t in zip(segments, result, texts)]
+
+
 def translate_segments(segments, src: str, tgt: str):
     """Translate in a few small batches (one segment per line)."""
+    if GROQ_API_KEY:
+        try:
+            return translate_segments_llm(segments, src, tgt)
+        except Exception as e:
+            log.warning("Groq translation failed, using fallback chain: %s", str(e)[:150])
+    if src == tgt:
+        return segments
     texts = [" ".join(t.split()) for _, _, t in segments]
 
     chunks, cur, size = [], [], 0
@@ -389,6 +485,32 @@ _KEEP_JOINERS = {0x200C, 0x200D}  # meaningful in Persian/Urdu spelling
 def clean_text(text: str, keep_joiners: bool = False) -> str:
     table = {k: None for k in _STRIP if not (keep_joiners and k in _KEEP_JOINERS)}
     return " ".join(text.translate(table).split())
+
+
+_AR_MARKS = (
+    set(range(0x064B, 0x0660)) | {0x0670, 0x0640}      # tashkeel, superscript alef, tatweel
+    | set(range(0x06D6, 0x06EE))                        # Quranic annotation marks
+)
+_AR_MARKS_MAP = {c: None for c in _AR_MARKS}
+
+
+def normalize_ar(text: str) -> str:
+    """Arabic-script text: NFKC (presentation forms -> letters), drop diacritics, alef wasla -> alef."""
+    text = unicodedata.normalize("NFKC", text).translate(_AR_MARKS_MAP)
+    return text.replace("\u0671", "\u0627")
+
+
+def odd_chars(text: str) -> str:
+    """Characters outside plain letters/digits/punctuation - helps find what renders as a box."""
+    seen = {}
+    for ch in text:
+        o = ord(ch)
+        if ch in " \n" or 0x20 <= o <= 0x7E or 0x0621 <= o <= 0x064A or o in (0x060C, 0x061B, 0x061F, 0x066A, 0x066B, 0x066C):
+            continue
+        if 0x0660 <= o <= 0x0669 or 0x06F0 <= o <= 0x06F9:
+            continue
+        seen[ch] = f"U+{o:04X} {unicodedata.name(ch, '?')}"
+    return "; ".join(list(seen.values())[:12])
 
 
 def wrap2(line: str, max_chars: int) -> str:
@@ -502,14 +624,16 @@ async def probe(video: Path):
 async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict) -> Path:
     scale = ""
     short_side = min(w, h)
-    if short_side > 720:  # keep the file small and the encode fast
-        f = 720 / short_side
+    if short_side > MAX_RES:  # keep the file small and the encode fast
+        f = MAX_RES / short_side
         w, h = int(w * f) // 2 * 2, int(h * f) // 2 * 2
         scale = f"scale={w}:{h},"
     portrait = h > w
 
     fonts = fonts_for(job["tgt"])
     font = fonts[job["font_i"] % len(fonts)]
+    log.info("burn: font=%s size=x%s style=%s pos=%s res=%sx%s", font, SIZES[job["size_i"]][1],
+             STYLES[job["style_i"]], POSITIONS[job["pos_i"]][0], w, h)
     mult = SIZES[job["size_i"]][1]
     base = 9 if portrait else 14  # relative to a 288px-high canvas
     font_size = max(6, round(base * mult))
@@ -547,7 +671,8 @@ def _ytdlp_download(url: str, workdir: Path, audio_only: bool = False) -> Path:
     opts = {
         "outtmpl": str(workdir / "input.%(ext)s"),
         # text-only mode needs just the audio -> much smaller/faster download
-        "format": "ba/b" if audio_only else "bv*[height<=720]+ba/b[height<=720]/b",
+        "format": "ba/b" if audio_only else "bv*+ba/b",
+        "format_sort": [f"res:{MAX_RES}", "ext:mp4:m4a"],
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -626,13 +751,18 @@ async def process(bot, chat_id: int, job: dict, status):
             if not segments:
                 raise UserError("no_speech")
 
-            if lang != tgt:
+            if lang != tgt or GROQ_API_KEY:
                 await set_status(status, T(ui, "p_trans"))
                 segments = await asyncio.to_thread(translate_segments, segments, lang, tgt)
                 st.mark("translate")
 
             keep_joiners = tgt in ("fa", "ur")
             segments = [(s, e, clean_text(t, keep_joiners)) for s, e, t in segments]
+            if tgt in ARABIC_SCRIPT:
+                raw_odd = odd_chars(" ".join(t for _, _, t in segments))
+                segments = [(s, e, normalize_ar(t)) for s, e, t in segments]
+                log.info("subtitle text: odd chars before=[%s] after=[%s]", raw_odd,
+                         odd_chars(" ".join(t for _, _, t in segments)))
             segments = [x for x in segments if x[2]]
             if not segments:
                 raise UserError("no_speech")
@@ -1010,7 +1140,10 @@ async def post_init(app: Application):
         if not shutil.which(tool):
             log.critical("%s not found in PATH - deploy with the Dockerfile!", tool)
     await filter_fonts()
-    await asyncio.to_thread(get_model)  # warm up so the first request is fast
+    if GROQ_API_KEY:
+        log.info("Groq enabled: ASR=%s LLM=%s (local Whisper loads only as a fallback)", GROQ_ASR_MODEL, GROQ_LLM_MODEL)
+    else:
+        await asyncio.to_thread(get_model)  # warm up so the first request is fast
     log.info("startup complete, memory in use: %s", mem_now())
 
 
