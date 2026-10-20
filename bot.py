@@ -18,6 +18,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from datetime import datetime, timedelta, timezone
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -192,6 +193,9 @@ STR = {
         "queued": "⏳ جاري التجهيز...",
         "queue": "⏳ ترتيبك في الطابور: {n} قبلك.",
         "proc_title": "⏳ جاري المعالجة...",
+        "limit_day": "وصلت حدّك اليومي ({n} مقاطع). جرّب غدًا.", "busy_user": "عندك مقطع قيد المعالجة. انتظر حتى ينتهي ثم أرسل الثاني.",
+        "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
+        "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
         "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
@@ -253,6 +257,9 @@ STR = {
         "queued": "⏳ Preparing...",
         "queue": "⏳ Your place in the queue: {n} ahead of you.",
         "proc_title": "⏳ Processing...",
+        "limit_day": "You've reached your daily limit ({n} clips). Try again tomorrow.", "busy_user": "You already have a clip being processed. Wait until it finishes.",
+        "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
+        "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
         "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
@@ -408,6 +415,8 @@ def transcribe(audio_path: str, language=None, vocab: str = ""):
         try:
             return transcribe_groq(audio_path, language, vocab)
         except Exception as e:
+            if "429" in str(e):   # free-tier limit: local Whisper on this tiny CPU would take forever
+                raise UserError("busy")
             log.warning("Groq transcription failed, using local Whisper: %s", str(e)[:150])
     segments, info = get_model().transcribe(
         audio_path,
@@ -1222,26 +1231,135 @@ PREFS: dict = {}          # str(user id) -> {"ui","tgt","mode","font_i","size_i"
 _prefs_lock = threading.Lock()
 
 
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "5"))        # finished jobs per person per day (the admin is exempt)
+ALLOWED_ENV = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
+ALLOWED_DB: set = set()
+DB_OK = False
+DB_STATUS = "غير مفعّلة (الحفظ في ملف مؤقت)"
+DIRTY: set = set()
+ACTIVE: set = set()       # users with a job running right now
+MEM_JOBS: dict = {}       # (uid, day) -> finished jobs, used when there is no database
+_RIYADH = timezone(timedelta(hours=3))
+
+
+def _today() -> str:
+    return datetime.now(_RIYADH).strftime("%Y-%m-%d")
+
+
+def _db():
+    import psycopg   # imported here so the bot still starts if the library or database is missing
+    return psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=8)
+
+
+def init_db():
+    global DB_OK, DB_STATUS
+    if not DATABASE_URL:
+        return
+    try:
+        with _db() as c:
+            c.execute("create table if not exists prefs (uid text primary key, data text not null, updated timestamptz default now())")
+            c.execute("create table if not exists jobs (id bigserial primary key, ts timestamptz default now(), uid text, ok boolean, secs integer)")
+            c.execute("create table if not exists allowed (uid bigint primary key)")
+            for uid, data in c.execute("select uid, data from prefs").fetchall():
+                PREFS[uid] = json.loads(data)
+            ALLOWED_DB.update(r[0] for r in c.execute("select uid from allowed").fetchall())
+        DB_OK, DB_STATUS = True, f"متصلة ✅ ({len(PREFS)} مستخدم محفوظ)"
+        log.info("database connected: %d users, %d allowed", len(PREFS), len(ALLOWED_DB))
+    except Exception as e:
+        DB_STATUS = f"فشل الاتصال ❌ ({type(e).__name__}: {str(e)[:120]}) - الحفظ في ملف مؤقت"
+        log.warning("database unavailable, using the local file: %s", str(e)[:200])
+
+
 def load_prefs():
     try:
         PREFS.update(json.loads(PREFS_FILE.read_text(encoding="utf-8")))
-        log.info("prefs loaded for %d users", len(PREFS))
     except Exception:
         pass
+    init_db()
+    log.info("prefs loaded for %d users", len(PREFS))
+
+
+def _flush_prefs():
+    global DB_OK
+    with _prefs_lock:
+        uids = list(DIRTY)
+        DIRTY.clear()
+        try:
+            if DB_OK:
+                with _db() as c:
+                    for u in uids:
+                        c.execute("insert into prefs (uid, data) values (%s, %s) on conflict (uid) do update "
+                                  "set data = excluded.data, updated = now()", (u, json.dumps(PREFS.get(u, {}), ensure_ascii=False)))
+            else:
+                tmp = PREFS_FILE.with_suffix(".tmp")
+                tmp.write_text(json.dumps(PREFS, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(PREFS_FILE)
+        except Exception as e:
+            DIRTY.update(uids)
+            log.warning("could not save prefs: %s", str(e)[:200])
 
 
 def save_prefs():
-    try:
-        with _prefs_lock:
-            tmp = PREFS_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(PREFS, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(PREFS_FILE)
-    except Exception as e:
-        log.warning("could not save prefs: %s", e)
+    threading.Thread(target=_flush_prefs, daemon=True).start()
 
 
 def uprefs(uid) -> dict:
+    DIRTY.add(str(uid))
     return PREFS.setdefault(str(uid), {})
+
+
+def record_job(uid, ok: bool, secs: int):
+    """Counts a job for the daily limit and the /stats numbers."""
+    if not uid:
+        return
+    if ok:
+        MEM_JOBS[(str(uid), _today())] = MEM_JOBS.get((str(uid), _today()), 0) + 1
+
+    def run():
+        try:
+            if DB_OK:
+                with _db() as c:
+                    c.execute("insert into jobs (uid, ok, secs) values (%s, %s, %s)", (str(uid), ok, secs))
+        except Exception as e:
+            log.warning("could not record job: %s", str(e)[:150])
+    threading.Thread(target=run, daemon=True).start()
+
+
+def jobs_today(uid) -> int:
+    if DB_OK:
+        try:
+            with _db() as c:
+                return c.execute("select count(*) from jobs where uid = %s and ok and ts >= "
+                                 "(date_trunc('day', now() at time zone 'Asia/Riyadh') at time zone 'Asia/Riyadh')",
+                                 (str(uid),)).fetchone()[0]
+        except Exception as e:
+            log.warning("could not count jobs: %s", str(e)[:150])
+    return MEM_JOBS.get((str(uid), _today()), 0)
+
+
+def is_allowed(uid) -> bool:
+    if uid == ADMIN_ID:
+        return True
+    pool = ALLOWED_ENV | ALLOWED_DB
+    return not pool or uid in pool
+
+
+def stats_text() -> str:
+    lines = [f"📊 الإحصائيات\nقاعدة البيانات: {DB_STATUS}", f"المستخدمون المحفوظون: {len(PREFS)}",
+             f"الحد اليومي: {DAILY_LIMIT} · المسموح لهم: {len(ALLOWED_ENV | ALLOWED_DB) or 'الجميع'}"]
+    if DB_OK:
+        try:
+            with _db() as c:
+                day = "(date_trunc('day', now() at time zone 'Asia/Riyadh') at time zone 'Asia/Riyadh')"
+                t = c.execute(f"select count(*), count(*) filter (where ok), count(distinct uid) from jobs where ts >= {day}").fetchone()
+                w = c.execute("select count(*), count(distinct uid) from jobs where ts >= now() - interval '7 days'").fetchone()
+                al = c.execute("select count(*) from jobs").fetchone()[0]
+            lines += [f"اليوم: {t[0]} طلب ({t[1]} نجح، {t[0] - t[1]} فشل) من {t[2]} شخص",
+                      f"آخر ٧ أيام: {w[0]} طلب من {w[1]} شخص", f"الإجمالي: {al} طلب"]
+        except Exception as e:
+            lines.append(f"تعذّر قراءة السجل: {str(e)[:100]}")
+    return "\n".join(lines)
 
 
 def apply_glossary(segments, gl: dict):
@@ -1684,6 +1802,7 @@ async def process(bot, chat_id: int, job: dict, status):
     st = Stages()
     prog = Progress(ui, status, mode)
     kept = False
+    done_ok = False
     PENDING.append(job["id"])
     try:
         ahead = PENDING.index(job["id"])
@@ -1810,6 +1929,7 @@ async def process(bot, chat_id: int, job: dict, status):
                     (T(ui, "card_count"), len(cues)), (T(ui, "card_font"), fonts_used[job["font_i"] % len(fonts_used)])])
                 if kept:
                     await offer_text_edit(bot, chat_id, ui, job["id"])
+        done_ok = True
         try:
             await status.delete()
         except TelegramError:
@@ -1826,6 +1946,8 @@ async def process(bot, chat_id: int, job: dict, status):
                  tgt, mode, st.summary())
         if job["id"] in PENDING:
             PENDING.remove(job["id"])
+        ACTIVE.discard(job.get("uid"))
+        record_job(job.get("uid"), done_ok, int(time.monotonic() - st.t0))
         if not kept:
             shutil.rmtree(workdir, ignore_errors=True)
         gc.collect()
@@ -1992,6 +2114,9 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
+    if not is_allowed(update.effective_user.id):
+        await msg.reply_text(T(get_ui(context, update.effective_user) or "ar", "not_allowed", id=update.effective_user.id))
+        return
     kind = data = None
     if msg.video:
         kind, data = "file", msg.video.file_id
@@ -2028,6 +2153,16 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def begin(context, q, job):
+    uid = job.get("uid")
+    if uid and uid != ADMIN_ID:
+        if uid in ACTIVE:
+            await safe_edit(q, T(job["ui"], "busy_user"))
+            return
+        if await asyncio.to_thread(jobs_today, uid) >= DAILY_LIMIT:
+            await safe_edit(q, T(job["ui"], "limit_day", n=DAILY_LIMIT))
+            return
+    if uid:
+        ACTIVE.add(uid)
     JOBS.pop(job["id"], None)
     if job.get("uid"):
         uprefs(job["uid"]).update({k: job[k] for k in ("tgt", "mode", "font_i", "size_i", "style_i", "pos_i", "bi")})
@@ -2343,6 +2478,47 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"ID: {update.effective_user.id}")
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    await update.effective_message.reply_text(await asyncio.to_thread(stats_text))
+
+
+async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/allow 123456  - add a person (the bot then only serves the list) ;  /allow  - show the list ;  /disallow 123456"""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    cmd = (msg.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    ids = [int(x) for x in re.findall(r"\d+", " ".join((msg.text or "").split()[1:]))]
+    if not ids:
+        pool = sorted(ALLOWED_ENV | ALLOWED_DB)
+        await msg.reply_text("المسموح لهم: " + (", ".join(map(str, pool)) if pool else "الجميع (القائمة فارغة)")
+                             + "\n\nللإضافة: /allow 123456\nللحذف: /disallow 123456")
+        return
+    for i in ids:
+        if cmd == "disallow":
+            ALLOWED_DB.discard(i)
+        else:
+            ALLOWED_DB.add(i)
+
+    def run():
+        if DB_OK:
+            with _db() as c:
+                for i in ids:
+                    if cmd == "disallow":
+                        c.execute("delete from allowed where uid = %s", (i,))
+                    else:
+                        c.execute("insert into allowed (uid) values (%s) on conflict do nothing", (i,))
+    try:
+        await asyncio.to_thread(run)
+        note = "" if DB_OK else "\n⚠️ قاعدة البيانات غير متصلة: التغيير يضيع عند إعادة التشغيل."
+        await msg.reply_text(("✅ تمت الإضافة" if cmd != "disallow" else "🗑 تم الحذف") + f": {', '.join(map(str, ids))}\n"
+                             "تذكير: إذا صارت القائمة غير فارغة فالبوت يخدم المسموح لهم فقط." + note)
+    except Exception as e:
+        await msg.reply_text(f"❌ تعذّر الحفظ: {str(e)[:150]}")
+
+
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
         return
@@ -2354,7 +2530,8 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"الطلبات في الطابور/المعالجة: {len(PENDING)}\n"
         f"Groq: {'مفعّل' if GROQ_API_KEY else 'غير مفعّل'} · ASR={GROQ_ASR_MODEL}\n"
         f"نماذج الترجمة المعطّلة مؤقتًا: {', '.join(bad) or 'لا يوجد'}\n"
-        f"الخطوط: {', '.join(FONTS_AR)}"
+        f"الخطوط: {', '.join(FONTS_AR)}\n"
+        f"قاعدة البيانات: {DB_STATUS}"
     )
 
 
@@ -2377,6 +2554,20 @@ async def filter_fonts():
     log.info("fonts offered: arabic=%s latin=%s", FONTS_AR, FONTS_LAT)
 
 
+async def db_keepalive(bot):
+    """Supabase's free plan pauses an idle project after a week: touch it every day."""
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            def ping():
+                with _db() as c:
+                    c.execute("select 1").fetchone()
+            await asyncio.to_thread(ping)
+        except Exception as e:
+            log.warning("database keep-alive failed: %s", str(e)[:150])
+            await notify_admin(bot, f"⚠️ تعذّر الاتصال بقاعدة البيانات: {str(e)[:200]}", key="db-keepalive")
+
+
 async def post_init(app: Application):
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
@@ -2386,8 +2577,10 @@ async def post_init(app: Application):
         log.info("Groq enabled: ASR=%s LLM=%s (local Whisper loads only as a fallback)", GROQ_ASR_MODEL, GROQ_LLM_MODEL)
     else:
         await asyncio.to_thread(get_model)  # warm up so the first request is fast
+    if DB_OK:
+        app.create_task(db_keepalive(app.bot))
     log.info("startup complete, memory in use: %s", mem_now())
-    await notify_admin(app.bot, f"🟢 البوت اشتغل (تشغيل جديد)\nالذاكرة: {mem_now()}", key="startup")
+    await notify_admin(app.bot, f"🟢 البوت اشتغل (تشغيل جديد)\nالذاكرة: {mem_now()}\nقاعدة البيانات: {DB_STATUS}", key="startup")
 
 
 # -------------------------------------------------------------------- main
@@ -2408,6 +2601,8 @@ def main():
     app.add_handler(CommandHandler("glossary", cmd_glossary))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE

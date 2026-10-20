@@ -2,3 +2,4 @@ python-telegram-bot[webhooks]==21.6
 faster-whisper==1.0.3
 requests
 yt-dlp
+psycopg[binary]>=3.2
