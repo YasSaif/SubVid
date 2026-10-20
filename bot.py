@@ -49,7 +49,8 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny")
 MAX_RES = int(os.environ.get("MAX_RES", "480"))  # max size of the SMALLER video side (480 = 480x854 portrait)
 USE_VAD = os.environ.get("USE_VAD", "1") != "0"  # "0" skips the VAD model (saves RAM, may add noise text)
 WHISPER_THREADS = int(os.environ.get("WHISPER_THREADS", "2"))
-MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
+MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "10"))          # burn-in video (slow on the free CPU)
+MAX_MINUTES_TXT = int(os.environ.get("MAX_MINUTES_TXT", "25"))  # text + SRT only (Groq accepts files up to 25MB)
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
 BURN_PRESET = os.environ.get("BURN_PRESET", "ultrafast")  # ultrafast = fastest encode (slightly bigger file)
 SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "1"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
@@ -211,7 +212,7 @@ STR = {
         "caption_srt": "ملف الترجمة المزمّنة (SRT)",
         "too_big": "⚠️ الفيديو الناتج أكبر من 50MB (حد تيليجرام للبوتات)، هذا ملف الترجمة بدلاً منه.",
         "no_speech": "ما قدرت أرصد كلاماً واضحاً في المقطع.",
-        "too_long": "الحد الأقصى لمدة المقطع {m} دقائق.",
+        "too_long": "الحد الأقصى لمدة المقطع في هذا الوضع {m} دقيقة. جرّب وضع «نص + SRT» للمقاطع الأطول.",
         "dl_fail": "تعذر تحميل الفيديو من هذا الرابط (قد يكون خاصاً أو محظوراً من السيرفر).",
         "dl_empty": "لم يتم العثور على فيديو في هذا الرابط.",
         "file_big": "تيليجرام يمنع البوت من تنزيل ملفات أكبر من 20MB. ارفع الفيديو على أي موقع وأرسل لي الرابط بدلاً من الملف.",
@@ -267,7 +268,7 @@ STR = {
         "caption_srt": "Timed subtitles file (SRT)",
         "too_big": "⚠️ The resulting video is over 50MB (Telegram's bot limit), here is the subtitle file instead.",
         "no_speech": "I couldn't detect clear speech in the clip.",
-        "too_long": "Maximum clip length is {m} minutes.",
+        "too_long": "Maximum clip length in this mode is {m} minutes. Try the text + SRT mode for longer clips.",
         "dl_fail": "Couldn't download the video from this link (it may be private or blocked from the server).",
         "dl_empty": "No video found at this link.",
         "file_big": "Telegram doesn't let bots download files over 20MB. Upload the video somewhere and send me the link instead.",
@@ -1504,8 +1505,9 @@ async def process(bot, chat_id: int, job: dict, status):
 
             w, h, duration = await probe(video)
             st.mark("probe")
-            if duration and duration > MAX_MINUTES * 60:
-                raise UserError("too_long", m=MAX_MINUTES)
+            limit = MAX_MINUTES_TXT if mode == "txt" else MAX_MINUTES
+            if duration and duration > limit * 60:
+                raise UserError("too_long", m=limit)
 
             await prog.step("audio")
             # clean the audio (rumble/hiss, uneven volume) so recognition doesn't depend on recording quality
@@ -1516,6 +1518,8 @@ async def process(bot, chat_id: int, job: dict, status):
                  str(audio)]
             )
             st.mark("audio")
+            if audio.stat().st_size > 24 * 1024 * 1024:
+                raise UserError("too_long", m=max(1, int(limit * 24 * 1024 * 1024 / audio.stat().st_size)))
 
             await prog.step("tr")
             gl = PREFS.get(str(job.get("uid")), {}).get("gl", {}) if job.get("uid") else {}
