@@ -168,7 +168,7 @@ def fonts_for(tgt: str):
 STR = {
     "ar": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\n\n🔒 خصوصيتك: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة:\n/language",
+        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (تيك توك أو رابط مباشر) أو ملف فيديو.\n\n⏱ أقصى مدة للمقطع: " + str(MAX_MINUTES) + " دقائق.\n(يوتيوب غير مدعوم حاليًا، أرسل الفيديو كملف.)\n\n🔒 خصوصيتك: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة:\n/language",
         "send_media": "أرسل رابط فيديو أو ملف فيديو.",
         "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
         "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
@@ -236,7 +236,7 @@ STR = {
     },
     "en": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "Welcome to SubVid Ai 🎬\n\nSend a video link (YouTube, TikTok, direct link) or a video file.\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
+        "welcome": "Welcome to SubVid Ai 🎬\n\nSend a video link (TikTok or a direct link) or a video file.\n\n⏱ Maximum clip length: " + str(MAX_MINUTES) + " minutes.\n(YouTube is not supported right now; send the video as a file.)\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
         "send_media": "Send a video link or a video file.",
         "src_q": "🔍 How should we find the spoken language in the clip?",
         "src_note": "ℹ️ Auto-detect may take a little longer; choosing the language manually is usually faster and more accurate.",
