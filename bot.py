@@ -197,9 +197,9 @@ STR = {
         "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
         "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
         "retry": "🔄 إعادة المحاولة",
-        "preview": "👁 معاينة مباشرة", "preview_all": "🔤 كل الخطوط والأنماط", "live_cap": "👁 معاينة مباشرة — تتحدث تلقائيًا مع كل تغيير في الخط أو الحجم أو النمط أو المكان أو الثنائية", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
+        "preview": "👁 معاينة مباشرة", "preview_all": "🔤 كل الخيارات", "live_cap": "👁 معاينة مباشرة — تتحدث تلقائيًا مع كل تغيير في الخط أو الحجم أو النمط أو المكان أو الثنائية", "preview_cap": "الخطوط · الأحجام · الأنماط · المكان · الثنائية",
         "pv_fonts": "الخطوط", "pv_sizes": "الأحجام", "pv_styles": "الأنماط", "pv_pos": "المكان", "pv_bi": "ثنائية اللغة",
-        "pv_bi_note": "تظهر الترجمة وتحتها اللغة الثانية بخط أصغر. تختار اللغة الثانية من بين كل اللغات (أو تتركها «اللغة الأصلية» للفيديو).", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
+        "pv_bi_note": "الترجمة فوق\\Nواللغة الثانية تحتها بخط أصغر", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
         "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
@@ -264,9 +264,9 @@ STR = {
         "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
         "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
         "retry": "🔄 Try again",
-        "preview": "👁 Live preview", "preview_all": "🔤 All fonts & styles", "live_cap": "👁 Live preview — updates automatically whenever you change font, size, style, position or bilingual", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
+        "preview": "👁 Live preview", "preview_all": "🔤 All options", "live_cap": "👁 Live preview — updates automatically whenever you change font, size, style, position or bilingual", "preview_cap": "Fonts · Sizes · Styles · Position · Bilingual",
         "pv_fonts": "Fonts", "pv_sizes": "Sizes", "pv_styles": "Styles", "pv_pos": "Position", "pv_bi": "Bilingual",
-        "pv_bi_note": "The translation is shown with the second language below it in a smaller font. You pick the second language from all languages (or keep the video\'s original language).", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
+        "pv_bi_note": "Translation on top\\Nsecond language below, smaller", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
         "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
@@ -2556,59 +2556,59 @@ async def combo_preview(group: str, font: str, ui: str):
 
     def title(y, text):
         an, x = (9, W - 24) if rtl_ui else (7, 24)
-        ev.append(f"Dialogue: 3,{L},Lbl,,0,0,0,,{{\\an{an}\\pos({x},{y})\\fn{lab}\\b1\\fs38\\1c&H0050D0FF&\\bord2}}{text}")
+        ev.append(f"Dialogue: 3,{L},Lbl,,0,0,0,,{{\\an{an}\\pos({x},{y})\\fn{lab}\\b1\\fs52\\1c&H0050D0FF&\\bord2}}{text}")
 
-    def small(x, y, text, an=7, fs=24, col="&H00E8E8E8&"):
+    def small(x, y, text, an=7, fs=40, col="&H00E8E8E8&"):
         ev.append(f"Dialogue: 3,{L},Lbl,,0,0,0,,{{\\an{an}\\pos({x},{y})\\fn{lab}\\b1\\fs{fs}\\1c{col}\\bord2}}{text}")
 
     for i, key_s in enumerate(STYLES):
         styles.append(_ass_style_line(f"S{i}", font, round(44 * font_scale(font, group)), STYLE_DEFS[key_s]))
     y = 10
     # 1) fonts
-    title(y, T(ui, "pv_fonts")); y += 58
-    cw, ch = 438, 110
+    title(y, T(ui, "pv_fonts")); y += 78
+    cw, ch = 438, 150
     rect(6, y - 4, W - 12, ch * ((len(fonts) + 1) // 2) + 8)
     for i, name in enumerate(fonts):
         x0, y0 = 12 + (i % 2) * cw, y + (i // 2) * ch
         small(x0 + 10, y0 + 4, f"{i + 1}. {name}")
-        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + cw // 2},{y0 + 72})\\fn{name}\\fs{round(44 * font_scale(name, group))}}}{sample}")
-    y += ch * ((len(fonts) + 1) // 2) + 14
+        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + cw // 2},{y0 + 104})\\fn{name}\\fs{round(44 * font_scale(name, group))}}}{sample}")
+    y += ch * ((len(fonts) + 1) // 2) + 16
     # 2) sizes
-    title(y, T(ui, "pv_sizes")); y += 58
-    rect(6, y - 4, W - 12, 128)
+    title(y, T(ui, "pv_sizes")); y += 78
+    rect(6, y - 4, W - 12, 160)
     for i, (k, mult) in enumerate(SIZES):
         x0 = 12 + i * 292
         small(x0 + 10, y + 4, T(ui, k))
-        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + 146},{y + 82})\\fs{round(32 * mult * font_scale(font, group))}}}{short}")
-    y += 142
+        ev.append(f"Dialogue: 3,{L},S0,,0,0,0,,{{\\an5\\pos({x0 + 146},{y + 108})\\fs{round(32 * mult * font_scale(font, group))}}}{short}")
+    y += 176
     # 3) styles
-    title(y, T(ui, "pv_styles")); y += 58
-    cw, ch = 450, 100
+    title(y, T(ui, "pv_styles")); y += 78
+    cw, ch = 450, 130
     for i, key_s in enumerate(STYLES):
         cx, cy = (i % 2) * cw, y + (i // 2) * ch
-        ev.append(f"Dialogue: 3,{L},S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + 64})}}{sample}")
+        ev.append(f"Dialogue: 3,{L},S{i},,0,0,0,,{{\\an5\\pos({cx + cw // 2},{cy + 90})}}{sample}")
         small(cx + 14, cy + 4, T(ui, "style_" + key_s))
     y += ch * ((len(STYLES) + 1) // 2) + 14
     # 4) position (three mini screens)
-    title(y, T(ui, "pv_pos")); y += 58
+    title(y, T(ui, "pv_pos")); y += 78
     fw, fh = 270, 150
     for i, (k, _) in enumerate(reversed(POSITIONS)):       # top, middle, bottom
         x0 = 15 + i * 295
         rect(x0, y, fw, fh, col="&H303030&", alpha="&H00&")
         yy = {"pos_top": y + 30, "pos_middle": y + fh // 2, "pos_bottom": y + fh - 30}[k]
         ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({x0 + fw // 2},{yy})\\fs{round(26 * font_scale(font, group))}}}{short}")
-        small(x0 + fw // 2, y + fh + 6, T(ui, k), an=8, fs=28)
-    y += fh + 56
+        small(x0 + fw // 2, y + fh + 6, T(ui, k), an=8, fs=40)
+    y += fh + 76
     # 5) bilingual
-    title(y, "🌐 " + T(ui, "pv_bi")); y += 58
+    title(y, "🌐 " + T(ui, "pv_bi")); y += 78
     main, sec = ("مرحبا بكم في البوت", "Welcome to the bot") if group == "ar" else ("Welcome to the bot", "مرحبا بكم في البوت")
-    rect(15, y, W - 30, 170, col="&H303030&", alpha="&H00&")
+    rect(15, y, W - 30, 180, col="&H303030&", alpha="&H00&")
     ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({W // 2},{y + 55})\\fs{round(42 * font_scale(font, group))}}}{main}")
     sec_font = "Noto Sans" if group == "ar" else "Noto Naskh Arabic"
-    ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({W // 2},{y + 122})\\fn{sec_font}\\fs30\\1c&H00D9D9D9&}}{sec}")
-    y += 184
-    ev.append(f"Dialogue: 3,{L},Lbl,,40,40,0,,{{\\an8\\pos({W // 2},{y})\\fn{lab}\\fs28\\1c&H00F0F0F0&\\bord2}}{T(ui, 'pv_bi_note')}")
-    H = y + 100
+    ev.append(f"Dialogue: 3,{L},S1,,0,0,0,,{{\\an5\\pos({W // 2},{y + 125})\\fn{sec_font}\\fs36\\1c&H00D9D9D9&}}{sec}")
+    y += 196
+    ev.append(f"Dialogue: 3,{L},Lbl,,40,40,0,,{{\\an8\\pos({W // 2},{y})\\fn{lab}\\fs38\\1c&H00F0F0F0&\\bord2}}{T(ui, 'pv_bi_note')}")
+    H = y + 150
     ass = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\nWrapStyle: 0\n\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
