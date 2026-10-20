@@ -168,7 +168,7 @@ def fonts_for(tgt: str):
 STR = {
     "ar": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\nلتغيير لغة الواجهة:\n/language",
+        "welcome": "أهلاً بك في SubVid Ai 🎬\n\nأرسل رابط فيديو (يوتيوب، تيك توك، رابط مباشر) أو ملف فيديو.\n\n🔒 خصوصيتك: تُحذف الفيديوهات من السيرفر بعد المعالجة (ويُحفظ الأخير ساعتين فقط إذا استخرجت نصه).\n⏳ إذا كان البوت نائمًا فقد يتأخر أول رد نحو دقيقة.\n\nلتغيير لغة الواجهة:\n/language",
         "send_media": "أرسل رابط فيديو أو ملف فيديو.",
         "src_q": "🔍 كيف تبي نحدد لغة الكلام في المقطع؟",
         "src_note": "ℹ️ الاكتشاف التلقائي قد ياخذ وقتاً أطول بقليل، واختيار اللغة يدوياً غالباً أسرع وأدق.",
@@ -196,6 +196,7 @@ STR = {
         "limit_day": "وصلت حدّك اليومي ({n} مقاطع). جرّب غدًا.", "busy_user": "عندك مقطع قيد المعالجة. انتظر حتى ينتهي ثم أرسل الثاني.",
         "not_allowed": "هذا البوت خاص حاليًا.\nمعرّفك: {id}\nأرسله لصاحب البوت ليضيفك.",
         "busy": "الخدمة مشغولة الآن (حدّ الاستخدام المجاني). جرّب بعد دقائق.",
+        "retry": "🔄 إعادة المحاولة", "waking": "⏳ البوت كان في وضع الراحة وبدأ للتو، فالمعالجة الأولى قد تكون أبطأ قليلًا.",
         "tx_offer": "تبي تعدّل النص؟ استخرجه وصحّحه وأعد إرساله لأدمجه من جديد.", "tx_btn": "📝 استخراج النص",
         "tx_how": "✏️ عدّل النص ثم أرسله لي (كرسالة أو كملف .txt/.srt).\n• السطور التي تبدأ بـ | هي النص الأصلي (في الترجمة الثنائية).\n• لا تغيّر أرقام الأسطر ولا تحذف سطرًا أو تضف سطرًا، وسأبقي التوقيت كما هو.\n• أو أرسل ملف SRT كاملًا بتوقيتك الخاص.\n• الملف محفوظ لساعتين.",
         "tx_expired": "انتهت صلاحية هذا الفيديو (يُحفظ ساعتين). أرسل الفيديو من جديد.",
@@ -203,8 +204,6 @@ STR = {
         "caption_edit": "✅ تم تطبيق تعديلاتك.",
         "bi": "ثنائية اللغة", "on": "مفعّلة", "off": "متوقفة",
         "quick": "⚡ تشغيل سريع (تلقائي ➜ {tgt}) بإعداداتي السابقة",
-        "gl_help": "📚 قاموسك الخاص (يصحّح الكلمات التي يخطئ فيها البوت)\n\nللإضافة اكتب كل كلمة في سطر:\n/glossary الكلمة الخطأ=الكلمة الصحيحة\n/glossary اسم_أو_مصطلح\n\nلحذف كلمة: /glossary del الكلمة\nلمسح الكل: /glossary clear",
-        "gl_list": "كلماتك المحفوظة", "gl_none": "القاموس فارغ.", "gl_added": "✅ تمت الإضافة", "gl_deleted": "🗑 تم الحذف", "gl_cleared": "🗑 تم مسح القاموس",
         "card_title": "تم بنجاح", "card_from": "من", "card_to": "إلى", "card_len": "مدة المقطع",
         "card_time": "وقت المعالجة", "card_count": "عدد الترجمات", "card_font": "الخط", "card_words": "الكلمات",
         "step_dl": "تحميل الفيديو", "step_audio": "استخراج الصوت", "step_tr": "تفريغ الكلام",
@@ -232,7 +231,7 @@ STR = {
     },
     "en": {
         "pick_ui": "🌐 اختر لغة الواجهة\nChoose the interface language",
-        "welcome": "Welcome to SubVid Ai 🎬\n\nSend a video link (YouTube, TikTok, direct link) or a video file.\nChange interface language: /language",
+        "welcome": "Welcome to SubVid Ai 🎬\n\nSend a video link (YouTube, TikTok, direct link) or a video file.\n\n🔒 Privacy: videos are deleted from the server after processing (the latest one is kept for 2 hours only if you export its text).\n⏳ If the bot was asleep, the first reply can take up to a minute.\n\nChange interface language: /language",
         "send_media": "Send a video link or a video file.",
         "src_q": "🔍 How should we find the spoken language in the clip?",
         "src_note": "ℹ️ Auto-detect may take a little longer; choosing the language manually is usually faster and more accurate.",
@@ -260,6 +259,7 @@ STR = {
         "limit_day": "You've reached your daily limit ({n} clips). Try again tomorrow.", "busy_user": "You already have a clip being processed. Wait until it finishes.",
         "not_allowed": "This bot is private for now.\nYour ID: {id}\nSend it to the bot owner to get access.",
         "busy": "The service is busy right now (free usage limit). Try again in a few minutes.",
+        "retry": "🔄 Try again", "waking": "⏳ The bot was resting and just woke up, so the first job may be a little slower.",
         "tx_offer": "Want to edit the text? Export it, fix it, and send it back to burn it again.", "tx_btn": "📝 Export text",
         "tx_how": "✏️ Edit the text and send it back (as a message or a .txt/.srt file).\n• Lines starting with | are the original text (bilingual mode).\n• Keep the numbering: don't add or delete entries, timing stays the same.\n• Or send a full SRT with your own timing.\n• The file is kept for 2 hours.",
         "tx_expired": "This video has expired (kept for 2 hours). Please send it again.",
@@ -267,8 +267,6 @@ STR = {
         "caption_edit": "✅ Your edits were applied.",
         "bi": "Bilingual", "on": "On", "off": "Off",
         "quick": "⚡ Quick run (auto ➜ {tgt}) with my last settings",
-        "gl_help": "📚 Your glossary (fixes words the bot gets wrong)\n\nAdd one entry per line:\n/glossary wrong word=correct word\n/glossary Name_or_term\n\nDelete: /glossary del word\nClear all: /glossary clear",
-        "gl_list": "Your saved terms", "gl_none": "The glossary is empty.", "gl_added": "✅ Added", "gl_deleted": "🗑 Deleted", "gl_cleared": "🗑 Glossary cleared",
         "card_title": "Done", "card_from": "From", "card_to": "To", "card_len": "Clip length",
         "card_time": "Processing time", "card_count": "Subtitles", "card_font": "Font", "card_words": "Words",
         "step_dl": "Downloading the video", "step_audio": "Extracting audio", "step_tr": "Transcribing speech",
@@ -517,7 +515,7 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
                  "Where the lines miss a word or phrase that the second transcript has and it fits the context, "
                  "put it back into the right line. ")
     if gloss:
-        task += ("User glossary - always use exactly these terms/spellings (format: heard => correct): "
+        task += ("Corrections already found for this transcript - always use exactly these terms/spellings (format: heard => correct): "
                  + "; ".join(f"{a} => {b}" if a != b else a for a, b in list(gloss.items())[:40]) + ". ")
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
@@ -551,6 +549,98 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
             if "HTTP 404" in str(e) or "HTTP 403" in str(e):
                 _llm_bad[model] = time.time() + 3600   # not available for this account -> skip for an hour
     raise last or RuntimeError("no LLM model available")
+
+
+def _llm_json(system: str, payload: dict, timeout: int = 60) -> dict:
+    """One JSON-mode call to the first available Groq model."""
+    last = None
+    for model in _LLM_MODELS:
+        if _llm_bad.get(model, 0) > time.time():
+            continue
+        body = {"model": model, "temperature": 0.1, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]}
+        if model.startswith("openai/gpt-oss"):
+            body["reasoning_effort"] = "low"
+        try:
+            r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
+                           headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=timeout)
+            if r.status_code >= 400:
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+            return json.loads(r.json()["choices"][0]["message"]["content"])
+        except Exception as e:
+            last = e
+            log.warning("Groq LLM %s failed: %s", model, str(e)[:200])
+            if "HTTP 429" in str(e):
+                global LLM_LIMITED_AT
+                LLM_LIMITED_AT = time.time()
+            if "HTTP 404" in str(e) or "HTTP 403" in str(e):
+                _llm_bad[model] = time.time() + 3600
+    raise last or RuntimeError("no LLM model available")
+
+
+LLM_LIMITED_AT = 0.0
+AUTO_REVIEW = os.environ.get("AUTO_REVIEW", "1") != "0"
+
+
+def auto_fixes(segments, alt: str, src_name: str) -> dict:
+    """Automatic proofreading of the raw transcript: finds misheard / garbled words (using the whole context and the
+    second speech model's version) and returns {wrong text: right text}. Replaces the old manual glossary."""
+    if not GROQ_API_KEY or not AUTO_REVIEW:
+        return {}
+    texts = [" ".join(t.split()) for _, _, t in segments][:400]
+    system = (
+        f"You proofread an automatic speech transcript ({src_name}) split into numbered lines. Speech recognition often "
+        "mishears words (similar sounds), garbles names and terms, or drops words. Use the whole context, the topic and the "
+        "second transcript of the same audio (if given) to find the wrong words. Return JSON "
+        '{"fixes": [{"wrong": "...", "right": "..."}]} with at most 25 items. "wrong" MUST be copied exactly, character '
+        "for character, from the lines (a word or a short phrase, 1-4 words), and \"right\" its most likely correct form in "
+        "the same language. Only include fixes you are confident about; do not rewrite style or grammar. If nothing needs "
+        'fixing return {"fixes": []}.')
+    try:
+        d = _llm_json(system, {"lines": texts, "second_transcript": alt[:3000]})
+    except Exception as e:
+        log.warning("auto proofreading skipped: %s", str(e)[:150])
+        return {}
+    joined = "\n".join(texts)
+    out = {}
+    for f in d.get("fixes", [])[:25]:
+        try:
+            w, r = str(f["wrong"]).strip(), str(f["right"]).strip()
+        except Exception:
+            continue
+        if w and r and w != r and w in joined and len(w) <= 60 and len(r) <= 80:
+            out[w] = r
+    log.info("auto proofreading: %d fixes", len(out))
+    if DEBUG_TEXT:
+        log.info("fixes: %s", out)
+    return out
+
+
+def review_translation(sources, translated, alt: str, src_name: str, tgt_name: str):
+    """Second pass: a strict reviewer compares each source line with its translation and corrects mistakes.
+    Keeps the same number of lines; any problem -> the original translation is kept."""
+    if not GROQ_API_KEY or not AUTO_REVIEW or not translated or len(translated) > 160:
+        return translated
+    system = (
+        f"You are a strict subtitle reviewer. For each numbered item you get the source line ({src_name}) and its "
+        f"translation into {tgt_name}. Fix mistranslations, missing words, wrong names and unnatural phrasing; keep the meaning "
+        "and the length of each line similar and do NOT merge, split or reorder lines. If a translation is already good, "
+        'return it unchanged. Return JSON {"t": [...]} with EXACTLY the same number of items.')
+    out = []
+    for i in range(0, len(translated), 30):
+        src_b, tr_b = sources[i:i + 30], translated[i:i + 30]
+        try:
+            d = _llm_json(system, {"items": [{"source": a, "translation": b} for a, b in zip(src_b, tr_b)],
+                                   "second_transcript": alt[:1500] if len(translated) <= 30 else ""})
+            t = d.get("t")
+            if not isinstance(t, list) or len(t) != len(tr_b):
+                raise ValueError("line count mismatch")
+            out += [str(x).strip() or o for x, o in zip(t, tr_b)]
+        except Exception as e:
+            log.warning("review skipped for a batch: %s", str(e)[:150])
+            out += tr_b
+    return out
 
 
 def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=None):
@@ -1393,23 +1483,6 @@ def apply_glossary(segments, gl: dict):
     return out
 
 
-def parse_glossary(text: str) -> dict:
-    out = {}
-    for line in text.replace("،", "\n").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        for sep in ("=>", "->", "=", "←", "→"):
-            if sep in line:
-                a, b = (x.strip() for x in line.split(sep, 1))
-                break
-        else:
-            a = b = line
-        if a and b and len(a) <= 40 and len(b) <= 40:
-            out[a] = b
-    return out
-
-
 _alert_last: dict = {}
 
 
@@ -1811,6 +1884,22 @@ async def run_ffmpeg(args, cwd=None, timeout=1500, duration=0.0, on_frac=None, g
         log.info("ffmpeg: %s", line[:220])
 
 
+RETRYABLE = {"busy", "dl_fail", "timeout"}
+RETRY: OrderedDict = OrderedDict()
+
+
+async def fail_with_retry(status, ui, text: str, job: dict):
+    """Error message with a 'Try again' button that re-runs the same request."""
+    RETRY[job["id"]] = job
+    while len(RETRY) > 100:
+        RETRY.popitem(last=False)
+    try:
+        await status.edit_text(text, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(T(ui, "retry"), callback_data=f"rt|{job['id']}")]]))
+    except TelegramError:
+        pass
+
+
 async def process(bot, chat_id: int, job: dict, status):
     ui, mode, tgt = job["ui"], job["mode"], job["tgt"]
     workdir = Path(tempfile.mkdtemp(prefix="subvid_"))
@@ -1848,22 +1937,28 @@ async def process(bot, chat_id: int, job: dict, status):
                 raise UserError("too_long", m=max(1, int(limit * 24 * 1024 * 1024 / audio.stat().st_size)))
 
             await prog.step("tr")
-            gl = PREFS.get(str(job.get("uid")), {}).get("gl", {}) if job.get("uid") else {}
-            vocab = ", ".join(dict.fromkeys(gl.values()))[:500]
-            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"], vocab)
+            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"])
             st.mark("transcribe")
             if DEBUG_TEXT:   # transcripts are private: only logged when DEBUG_TEXT=1 is set on Render
                 log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
                 raise UserError("no_speech")
 
+            names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
+            await prog.step("trans")
+            gl = await asyncio.to_thread(auto_fixes, segments, alt, names.get(lang, lang))   # automatic proofreading
             segments = apply_glossary(segments, gl)
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
             if lang != tgt or GROQ_API_KEY:
-                await prog.step("trans")
                 segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt, gl)
+                if lang != tgt and len(segments) == len(orig_texts):   # reviewer pass
+                    reviewed = await asyncio.to_thread(review_translation, orig_texts, [t for _, _, t in segments], alt,
+                                                       names.get(lang, lang), names.get(tgt, tgt))
+                    segments = [(a, b, r) for (a, b, _), r in zip(segments, reviewed)]
                 st.mark("translate")
+            if time.time() - LLM_LIMITED_AT < 120:
+                await notify_admin(bot, "⚠️ حصة Groq للترجمة المجانية وصلت حدّها (429). البوت يستخدم نموذجًا احتياطيًا.", key="groq-llm-429")
 
             keep_joiners = tgt in ("fa", "ur")
             segments = [(s, e, clean_text(t, keep_joiners)) for s, e, t in segments]
@@ -1950,10 +2045,15 @@ async def process(bot, chat_id: int, job: dict, status):
         except TelegramError:
             pass
     except UserError as e:
-        await set_status(status, "⚠️ " + T(ui, e.key, **e.kw))
+        if e.key in RETRYABLE:
+            await fail_with_retry(status, ui, "⚠️ " + T(ui, e.key, **e.kw), job)
+        else:
+            await set_status(status, "⚠️ " + T(ui, e.key, **e.kw))
+        if e.key == "busy":
+            await notify_admin(bot, "⚠️ حصة Groq للتفريغ الصوتي المجانية وصلت حدّها (429). المستخدمون يرون «الخدمة مشغولة».", key="groq-asr-429")
     except Exception as e:
         log.exception("job failed")
-        await set_status(status, "❌ " + T(ui, "generic"))
+        await fail_with_retry(status, ui, "❌ " + T(ui, "generic"), job)
         await notify_admin(bot, f"❌ فشل طلب {job['id']}\nالمرحلة: {prog.cur}\n{mode}: {job.get('src') or 'auto'} ← {tgt}\n"
                                 f"الخطأ: {type(e).__name__}: {str(e)[:400]}", key=f"job-{type(e).__name__}")
     finally:
@@ -2082,35 +2182,6 @@ def get_ui(context, user):
     return ui
 
 
-async def cmd_glossary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg, user = update.effective_message, update.effective_user
-    ui = get_ui(context, user) or "ar"
-    pr = uprefs(user.id)
-    gl = pr.setdefault("gl", {})
-    body = (msg.text or "").split(None, 1)
-    arg = body[1].strip() if len(body) > 1 else ""
-    if arg.lower() == "clear":
-        gl.clear()
-        save_prefs()
-        await msg.reply_text(T(ui, "gl_cleared"))
-        return
-    if arg.lower().startswith("del "):
-        gl.pop(arg[4:].strip(), None)
-        save_prefs()
-        await msg.reply_text(T(ui, "gl_deleted"))
-        return
-    if arg:
-        new = parse_glossary(arg)
-        for a, b in new.items():
-            if len(gl) < 60 or a in gl:
-                gl[a] = b
-        save_prefs()
-        await msg.reply_text(f"{T(ui, 'gl_added')} ({len(new)})")
-        return
-    listing = "\n".join(f"• {a} ⇢ {b}" if a != b else f"• {a}" for a, b in gl.items()) or T(ui, "gl_none")
-    await msg.reply_text(f"{T(ui, 'gl_help')}\n\n{T(ui, 'gl_list')}:\n{listing}")
-
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     ui = get_ui(context, update.effective_user)
@@ -2129,6 +2200,11 @@ async def cmd_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
+    if time.time() - START_TIME < 150:
+        try:
+            await msg.reply_text(T(get_ui(context, update.effective_user) or "ar", "waking"))
+        except TelegramError:
+            pass
     if not is_allowed(update.effective_user.id):
         await msg.reply_text(T(get_ui(context, update.effective_user) or "ar", "not_allowed", id=update.effective_user.id))
         return
@@ -2207,6 +2283,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(q, text, markup)
         else:
             await safe_edit(q, T(ui, "welcome"))
+        return
+
+    if act == "rt":
+        job = RETRY.pop(parts[1] if len(parts) > 1 else "", None)
+        if not job or job.get("uid") not in (None, q.from_user.id):
+            await safe_edit(q, T(context.user_data.get("ui") or "ar", "expired"))
+            return
+        job["id"] = uuid.uuid4().hex[:10]
+        await begin(context, q, job)
         return
 
     if act == "tx":
@@ -2613,7 +2698,6 @@ def main():
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("fonttest", cmd_fonttest))
-    app.add_handler(CommandHandler("glossary", cmd_glossary))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("stats", cmd_stats))
@@ -2627,7 +2711,7 @@ def main():
         )
     )
     app.add_handler(
-        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|x)(\||$)")
+        CallbackQueryHandler(on_button, pattern=r"^(ui|src|sl|ss|tgl|tg|md|cy|fp|sp|go|qk|tx|rt|x)(\||$)")
     )
     app.add_error_handler(on_error)
 
