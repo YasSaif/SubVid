@@ -52,6 +52,8 @@ MAX_MINUTES = int(os.environ.get("MAX_MINUTES", "3"))
 COOKIES_FILE = os.environ.get("YTDLP_COOKIES")  # optional cookies.txt for yt-dlp
 BURN_PRESET = os.environ.get("BURN_PRESET", "ultrafast")  # ultrafast = fastest encode (slightly bigger file)
 SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "1"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)   # your Telegram numeric id (send /id to the bot); receives error alerts
+START_TIME = time.time()
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
@@ -914,6 +916,102 @@ async def set_status(msg, text: str):
         pass
 
 
+_alert_last: dict = {}
+
+
+async def notify_admin(bot, text: str, key: str = ""):
+    """Short alert to the owner; the same alert is sent at most once a minute."""
+    if not ADMIN_ID:
+        return
+    key = key or text[:80]
+    now = time.monotonic()
+    if now - _alert_last.get(key, -999) < 60:
+        return
+    _alert_last[key] = now
+    try:
+        await bot.send_message(ADMIN_ID, text[:3500])
+    except TelegramError:
+        pass
+
+
+def install_health_route():
+    """Adds GET/HEAD /health -> 200 'ok' to the webhook server so uptime monitors see the bot as up."""
+    try:
+        import tornado.web
+        from telegram.ext._utils import webhookhandler as wh
+
+        class Health(tornado.web.RequestHandler):
+            def get(self):
+                self.set_header("Content-Type", "text/plain")
+                self.write("ok")
+
+            def head(self):
+                self.set_status(200)
+
+        original = wh.WebhookAppClass.__init__
+
+        def patched(self, *a, **k):
+            original(self, *a, **k)
+            self.add_handlers(r".*", [(r"/(?:health)?/?", Health)])
+
+        wh.WebhookAppClass.__init__ = patched
+        log.info("health endpoint enabled (GET /health)")
+    except Exception as e:
+        log.warning("could not add the health endpoint: %s", e)
+
+
+_BANNER: dict = {}   # "file_id" or "png"
+
+
+async def banner_png():
+    """Welcome picture drawn once with ffmpeg + libass (no extra libraries)."""
+    if "png" in _BANNER:
+        return _BANNER["png"]
+    W, H = 1280, 640
+    ass = (
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: T,Noto Sans,120,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,4,0,1,0,0,5,0,0,0,1\n"
+        "Style: A,Noto Naskh Arabic,50,&H00F2E8D5,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1\n"
+        "Style: E,Noto Sans,30,&H00D8C9A8,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,1,0,1,0,0,5,0,0,0,1\n"
+        "Style: P,Noto Naskh Arabic,46,&H00FFFFFF,&H000000FF,&H90000000,&H90000000,1,0,0,0,100,100,0,0,3,14,0,5,0,0,0,1\n"
+        "Style: C,Noto Sans,24,&H00B7A98A,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,3,0,1,0,0,5,0,0,0,1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,T,,0,0,0,,{\\pos(640,205)}SubVid Ai\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,A,,0,0,0,,{\\pos(640,318)}ترجم فيديوهاتك وانقش الترجمة عليها في ثوانٍ\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,E,,0,0,0,,{\\pos(640,378)}Translate videos and burn subtitles into them\n"
+        "Dialogue: 1,0:00:00.00,0:00:05.00,P,,0,0,0,,{\\pos(640,505)}السلام عليكم ورحمة الله\n"
+        "Dialogue: 0,0:00:00.00,0:00:05.00,C,,0,0,0,,{\\pos(640,590)}YOUTUBE   ·   TIKTOK   ·   MP4   ·   SRT\n"
+    )
+    workdir = Path(tempfile.mkdtemp(prefix="banner_"))
+    try:
+        (workdir / "b.ass").write_text(ass, encoding="utf-8")
+        for bg in (f"gradients=s={W}x{H}:c0=0x0a1d29:c1=0x1b6a66:x0=0:y0=0:x1={W}:y1={H}:d=1",
+                   f"color=c=0x12363d:s={W}x{H}:d=1"):
+            rc, _, _ = await run_capture(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", bg,
+                                          "-vf", "ass=b.ass", "-frames:v", "1", "b.png"], cwd=str(workdir))
+            if rc == 0 and (workdir / "b.png").exists():
+                _BANNER["png"] = (workdir / "b.png").read_bytes()
+                return _BANNER["png"]
+        return None
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def send_banner(msg):
+    try:
+        photo = _BANNER.get("file_id") or await banner_png()
+        if not photo:
+            return
+        sent = await msg.reply_photo(photo=photo)
+        if sent.photo:
+            _BANNER["file_id"] = sent.photo[-1].file_id   # next time Telegram reuses it: no upload
+    except TelegramError as e:
+        log.warning("banner not sent: %s", e)
+
+
 class Progress:
     """One status message that shows a checklist (and a bar while burning). Edits are throttled."""
 
@@ -1072,10 +1170,22 @@ async def process(bot, chat_id: int, job: dict, status):
                     elapsed = int(time.monotonic() - st.t0)
                     caption = (f"{T(ui, 'caption_burn')}\n🌐 {LANGS.get(lang, lang)} ➜ {LANGS.get(tgt, tgt)}"
                                f" · ⏱ {elapsed}{T(ui, 'secs')}")
+                    thumb = workdir / "thumb.jpg"
+                    try:   # small cover picture: Telegram shows it as the preview
+                        await run_cmd(["ffmpeg", "-y", "-ss", str(min(1.0, (duration or 2) / 2)), "-i", str(out),
+                                       "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", str(thumb)], timeout=60)
+                    except Exception:
+                        thumb = None
+                    ow, oh = out_size(w, h)
                     with open(out, "rb") as f:
-                        ow, oh = out_size(w, h)
-                        await bot.send_video(chat_id, f, supports_streaming=True, caption=caption,
-                                             width=ow or None, height=oh or None, duration=int(duration) or None)
+                        tf = open(thumb, "rb") if thumb and thumb.exists() else None
+                        try:
+                            await bot.send_video(chat_id, f, supports_streaming=True, caption=caption,
+                                                 width=ow or None, height=oh or None, duration=int(duration) or None,
+                                                 thumbnail=tf)
+                        finally:
+                            if tf:
+                                tf.close()
                 st.mark("upload")
         try:
             await status.delete()
@@ -1083,9 +1193,11 @@ async def process(bot, chat_id: int, job: dict, status):
             pass
     except UserError as e:
         await set_status(status, "⚠️ " + T(ui, e.key, **e.kw))
-    except Exception:
+    except Exception as e:
         log.exception("job failed")
         await set_status(status, "❌ " + T(ui, "generic"))
+        await notify_admin(bot, f"❌ فشل طلب {job['id']}\nالمرحلة: {prog.cur}\n{mode}: {job.get('src') or 'auto'} ← {tgt}\n"
+                                f"الخطأ: {type(e).__name__}: {str(e)[:400]}", key=f"job-{type(e).__name__}")
     finally:
         log.info("job %s (%s -> %s, %s) timings: %s", job["id"], job.get("src") or "auto",
                  tgt, mode, st.summary())
@@ -1195,6 +1307,7 @@ async def safe_edit(q, text, markup=None):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     ui = context.user_data.get("ui")
+    await send_banner(msg)
     if not ui:
         text, markup = screen_ui_picker()
         await msg.reply_text(text, reply_markup=markup)
@@ -1526,6 +1639,27 @@ async def cmd_fonttest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     log.error("handler error", exc_info=context.error)
+    err = context.error
+    await notify_admin(context.bot, f"⚠️ خطأ في البوت\n{type(err).__name__}: {str(err)[:400]}", key=f"h-{type(err).__name__}")
+
+
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(f"ID: {update.effective_user.id}")
+
+
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    up = int(time.time() - START_TIME)
+    bad = [m for m, t in _llm_bad.items() if t > time.time()]
+    await update.effective_message.reply_text(
+        f"✅ شغّال منذ {up // 3600}س {up % 3600 // 60}د\n"
+        f"الذاكرة الآن: {mem_now()} · الذروة: {mem_peak()}\n"
+        f"الطلبات في الطابور/المعالجة: {len(PENDING)}\n"
+        f"Groq: {'مفعّل' if GROQ_API_KEY else 'غير مفعّل'} · ASR={GROQ_ASR_MODEL}\n"
+        f"نماذج الترجمة المعطّلة مؤقتًا: {', '.join(bad) or 'لا يوجد'}\n"
+        f"الخطوط: {', '.join(FONTS_AR)}"
+    )
 
 
 async def filter_fonts():
@@ -1557,6 +1691,7 @@ async def post_init(app: Application):
     else:
         await asyncio.to_thread(get_model)  # warm up so the first request is fast
     log.info("startup complete, memory in use: %s", mem_now())
+    await notify_admin(app.bot, f"🟢 البوت اشتغل (تشغيل جديد)\nالذاكرة: {mem_now()}", key="startup")
 
 
 # -------------------------------------------------------------------- main
@@ -1574,6 +1709,8 @@ def main():
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("language", cmd_language))
     app.add_handler(CommandHandler("fonttest", cmd_fonttest))
+    app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE
@@ -1587,6 +1724,7 @@ def main():
     app.add_error_handler(on_error)
 
     if WEBHOOK_URL:
+        install_health_route()
         app.run_webhook(
             listen="0.0.0.0",
             port=PORT,
