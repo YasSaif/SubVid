@@ -1107,6 +1107,50 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
     return out
 
 
+def supervise_cues(cues, max_chars: int):
+    """The supervisor: checks every cue before it is burnt. One line whenever the text fits, at most two balanced lines,
+    never three; a cue that is too long is split in two at the best place (time shared by length)."""
+    out, fixes = [], 0
+    stack = list(cues)[::-1]
+    while stack:
+        a, b, t = stack.pop()
+        if "\x01" in t:
+            out.append((a, b, t))
+            continue
+        flat = " ".join(t.split())
+        words = flat.split()
+        if len(flat) <= max_chars:
+            new = flat
+        elif len(flat) <= 2 * max_chars or len(words) < 4:
+            new = wrap2(flat, max_chars)
+            if any(len(x) > max_chars + 2 for x in new.split("\n")) and len(words) >= 4:
+                new = None
+        else:
+            new = None
+        if new is None:                                       # too long for two lines: split into two cues
+            best = None
+            for i in range(2, len(words) - 1):
+                x, y = " ".join(words[:i]), " ".join(words[i:])
+                cost = abs(len(x) - len(y)) / len(flat) * 3 + break_cost(words[i - 1], words[i])
+                if best is None or cost < best[0]:
+                    best = (cost, i, x, y)
+            if best is None:
+                out.append((a, b, wrap2(flat, max_chars)))
+                continue
+            _, i, x, y = best
+            mid = a + (b - a) * len(x) / len(flat)
+            stack.append((mid, b, y))
+            stack.append((a, mid, x))
+            fixes += 1
+            continue
+        if new != t:
+            fixes += 1
+        out.append((a, b, new))
+    if fixes:
+        log.info("supervisor adjusted %d cues", fixes)
+    return out
+
+
 def make_cues(segments, max_chars: int, origs=None, wmap=None):
     """Timed cues, one line each when the timing allows it, otherwise two tidy balanced lines.
     origs (optional): original-language text per segment, added as small marked lines (\\x01) under the translation."""
@@ -1275,7 +1319,7 @@ def chars_per_line(w: int, h: int, job: dict, duration: float = 0.0) -> int:
     px = base * SIZES[job["size_i"]][1] * font_scale(font, group) * oh / 288
     avail = ow * (1 - 40 / 384)                     # side margins are 20 of 384 units each
     if tgt in ARABIC_SCRIPT:
-        factor = 0.25                               # measured on a real 1080x1920 render: ~24.5 px per char at medium
+        factor = 0.30                               # measured on real renders: 23-28 px per char at medium (1080 wide); with margin
     elif tgt in CJK:
         factor = 1.0
     else:
@@ -2411,6 +2455,7 @@ async def process(bot, chat_id: int, job: dict, status):
                     planned += sem[k]
                 else:
                     planned += make_cues([seg], max_chars, [origs[k]] if origs else None, words_out)
+            planned = supervise_cues(planned, max_chars)
             cues = fix_overlaps(planned)
             if dbg:
                 LAST_DEBUG.clear()
