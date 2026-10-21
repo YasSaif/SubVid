@@ -1275,7 +1275,7 @@ def chars_per_line(w: int, h: int, job: dict, duration: float = 0.0) -> int:
     px = base * SIZES[job["size_i"]][1] * font_scale(font, group) * oh / 288
     avail = ow * (1 - 40 / 384)                     # side margins are 20 of 384 units each
     if tgt in ARABIC_SCRIPT:
-        factor = 0.46
+        factor = 0.25                               # measured on a real 1080x1920 render: ~24.5 px per char at medium
     elif tgt in CJK:
         factor = 1.0
     else:
