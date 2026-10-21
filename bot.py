@@ -645,9 +645,10 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
         "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
-        "NEVER delete or skip words or sentences: every spoken word must stay in the output. "
         "If a word looks garbled, replace it with the most likely intended word given the context. "
     )
+    task += ("NEVER delete or skip words or sentences: every spoken word must stay in the output. " if fix_only else
+             "Do not drop any information; only pure fillers (so, well, now, you know, um) may be left out. ")
     if alt:
         task += ("A second speech-recognition model transcribed the same audio as: \"" + alt[:1500] + "\". "
                  "Where the lines miss a word or phrase that the second transcript has and it fits the context, "
@@ -658,8 +659,13 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
     else:
-        task += (f"First fix obvious mistakes using the context, then translate each line into natural, "
-                 f"fluent {tgt_name}, as a native speaker would say it. Keep proper names correct.")
+        task += (f"First fix obvious mistakes using the context, then translate each line into {tgt_name} the way a professional "
+                 "subtitler would: translate the MEANING, not word by word, and re-order phrases as the target language "
+                 "requires; use correct grammar and agreement (in Arabic: verb-subject agreement, correct prepositions, "
+                 "natural word order) and the standard term for technical, military and political vocabulary. Write names of "
+                 "people, organizations and media outlets in the target script when they have a common form (for example "
+                 "Arab News -> عرب نيوز), but keep acronyms such as ISR or NASA as they are. The lines are consecutive pieces "
+                 "of one speech; each line is a whole sentence or phrase.")
     task += (' Return JSON {"t": [...]} with EXACTLY the same number of items, in the same order, '
              "one output string per input line. No explanations.")
     last = None
@@ -753,10 +759,12 @@ def review_translation(sources, translated, alt: str, src_name: str, tgt_name: s
     if not GROQ_API_KEY or not AUTO_REVIEW or not translated or len(translated) > 160:
         return translated
     system = (
-        f"You are a strict subtitle reviewer. For each numbered item you get the source line ({src_name}) and its "
-        f"translation into {tgt_name}. Fix mistranslations, missing words, wrong names and unnatural phrasing; keep the meaning "
-        "and the length of each line similar and do NOT merge, split or reorder lines. If a translation is already good, "
-        'return it unchanged. Return JSON {"t": [...]} with EXACTLY the same number of items.')
+        f"You are a senior subtitle editor and a native {tgt_name} speaker. For each numbered item you get the source line "
+        f"({src_name}) and its translation into {tgt_name}. Fix: mistranslations, grammar and agreement mistakes, "
+        "word-for-word literal phrasing (rewrite it as a native speaker would naturally say it), information missing from the "
+        "translation (put it back), wrong names, and Latin-script names that should be written in the target script (keep "
+        "acronyms). Keep each item the same sentence: do NOT merge, split or reorder items; the length may change by up to 30%. "
+        'If a translation is already natural and correct, return it unchanged. Return JSON {"t": [...]} with EXACTLY the same number of items.')
     out = []
     for i in range(0, len(translated), 30):
         src_b, tr_b = sources[i:i + 30], translated[i:i + 30]
@@ -906,8 +914,12 @@ _PUNCT_END = ".,;:!?،؛؟…"
 def break_cost(prev: str, nxt: str) -> float:
     """How bad it is to cut a subtitle between these two words (lower = better place to cut)."""
     c = 0.0
-    if prev and prev[-1] in _PUNCT_END:
-        c -= 2.0
+    if prev and prev[-1] in ".!?؟…。！？":
+        c -= 3.5                                   # end of a sentence: the best place to cut
+    elif prev and prev[-1] in _PUNCT_END:
+        c -= 1.5
+    if re.match(r"^[A-Za-z][A-Za-z.\-']*$", prev.strip(_PUNCT_END)) and re.match(r"^[A-Za-z]", nxt) and prev[-1:] not in _PUNCT_END:
+        c += 3.0                                   # never cut inside a Latin name such as "Arab News"
     p = prev.strip(_PUNCT_END + "\"'()[]").lower()
     n = nxt.strip(_PUNCT_END + "\"'()[]").lower()
     if p in _END_BAD or p in _TITLES:
@@ -967,8 +979,8 @@ def chunk_words(words, limit: int, start: float, end: float, sw):
             if i - j == 1 and l < 0.4 * limit:
                 c += 3.0
             d = t_at(i) - t_at(j)
-            if d < 0.8:
-                c += (0.8 - d) * 4
+            if d < 1.3:
+                c += (1.3 - d) * 6                 # a cue shown for under ~1.3 s cannot be read
             if dp[j] + c < dp[i]:
                 dp[i], prev[i] = dp[j] + c, j
     out, i = [], n
@@ -979,6 +991,36 @@ def chunk_words(words, limit: int, start: float, end: float, sw):
 
 
 MIN_CUE = 0.6   # seconds: a one-line cue shorter than this is hard to read, so the segment keeps two lines instead
+
+
+def merge_sentences(segments, wmap):
+    """Joins Whisper's segments (often cut in the middle of a sentence) into whole sentences, so each sentence is translated
+    and shown as one unit. Returns (segments, wmap) with the same structure."""
+    out, new_map, group = [], {}, []
+
+    def flush():
+        if not group:
+            return
+        a, b = group[0][0], group[-1][1]
+        text = " ".join(t for _, _, t in group)
+        ws = []
+        for x, y, _ in group:
+            for w in wmap.get((x, y)) or []:
+                if not ws or w[0] > ws[-1][0] + 1e-6:      # neighbouring segments may share a boundary word
+                    ws.append(w)
+        out.append((a, b, text))
+        if len(ws) >= 2:
+            new_map[(a, b)] = ws
+        group.clear()
+
+    for seg in segments:
+        group.append(seg)
+        text = " ".join(t for _, _, t in group)
+        done = text.rstrip().endswith((".", "!", "?", "؟", "…", "。", "！", "？", ".\"", "?\"", "!\""))
+        if done or len(text) > 260 or group[-1][1] - group[0][0] > 14:
+            flush()
+    flush()
+    return out, new_map
 
 
 def _plan_cues(words, start, end, limit, sw):
@@ -1013,9 +1055,7 @@ def make_cues(segments, max_chars: int, origs=None, wmap=None):
             continue
         ow = origs[idx].split() if origs and origs[idx] else []
         sw = (wmap or {}).get((start, end)) or []
-        plan = _plan_cues(words, start, end, max_chars, sw)                    # one line per cue
-        if len(plan) > 1 and (len(sw) < 2 or sum(d for _, d, _, _, _ in plan) / len(plan) < MIN_CUE):
-            plan = _plan_cues(words, start, end, 2 * max_chars, sw)            # timing too coarse: keep two lines
+        plan = _plan_cues(words, start, end, 2 * max_chars, sw)                # movie style: a cue = one phrase, max two lines
         for t, d, line, p0, p1 in plan:
             txt = wrap2(line, max_chars)
             if ow:
@@ -1036,13 +1076,13 @@ def dedupe_repeats(text: str) -> str:
     return " ".join(out)
 
 
-def fix_overlaps(cues, gap=0.04, min_show=0.35):
+def fix_overlaps(cues, gap=0.08, min_show=0.35):
     """Cues must never be on screen together: each one ends before the next starts, and is held long
     enough to read (with a small hold after the voice, because word timings are only approximate)."""
     cues = sorted(([a, b, t] for a, b, t in cues), key=lambda c: c[0])
     for i, c in enumerate(cues):
         a, b, t = c
-        want = max(b + 0.25, a + max(0.8, 0.045 * len(t)))   # hold: at least ~0.8 s or 45 ms per character
+        want = max(b + 0.35, a + min(6.0, max(1.2, 0.058 * len(t.replace("\x01", "")))))   # hold: reading speed ~17 chars/s, at least 1.2 s
         if i + 1 < len(cues):
             limit = cues[i + 1][0] - gap
             if limit - a >= 0.2:                            # a short cue is better than a late next one
@@ -2248,6 +2288,7 @@ async def process(bot, chat_id: int, job: dict, status):
             await prog.step("trans")
             gl = await asyncio.to_thread(auto_fixes, segments, alt, names.get(lang, lang))   # automatic proofreading
             segments = apply_glossary(segments, gl)
+            segments, words_out = merge_sentences(segments, words_out)   # translate and show whole sentences
             src_segments = segments
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
