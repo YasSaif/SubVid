@@ -417,6 +417,35 @@ def get_model() -> WhisperModel:
         return _model
 
 
+_HALLU_CONTAINS = [
+    "اشتركوا في القناه", "اشترك في القناه", "اشتركو في القناه", "اشتركوا بالقناه", "اشترك بالقناه", "لا تنسوا الاشتراك",
+    "لا تنسى الاشتراك", "لا تنسو الاشتراك", "شكرا للمشاهده", "شكرا لمشاهدتكم", "شكرا على المشاهده", "شكرا لكم على المشاهده",
+    "ترجمه نانسي", "ترجمه هدى", "اشتركوا بالقناه", "thanks for watching", "thank you for watching", "please subscribe",
+    "like and subscribe", "subscribe to the channel", "amara org", "subtitles by", "subtitled by", "subtitles made by",
+]
+_HALLU_EXACT = {"ترجمه", "الترجمه", "اشتركوا", "اشترك", "subscribe", "bye", "thank you", "thanks", "you", "شكرا", "شكرا لكم"}
+
+
+def _norm_h(text: str) -> str:
+    t = unicodedata.normalize("NFKC", text).lower().translate(_AR_MARKS_MAP)
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ة", "ه").replace("ى", "ي")
+    return " ".join(re.sub(r"[^\w\s]", " ", t).split())
+
+
+def is_hallucination(text: str, edge: bool, no_speech: float, logprob: float, comp: float) -> bool:
+    """Whisper invents stock phrases ("subscribe to the channel") on music/noise, mostly at the start or end of a clip."""
+    if comp and comp > 2.4:                      # repetition loop
+        return True
+    if no_speech > 0.6 and logprob < -1.0:       # probably no speech and the model is unsure
+        return True
+    n = _norm_h(text)
+    if not n:
+        return True
+    if n in _HALLU_EXACT or (len(n) <= 70 and any(ph in n for ph in _HALLU_CONTAINS)):
+        return edge or logprob < -0.45 or no_speech > 0.25
+    return False
+
+
 def _groq_asr(audio_path: str, model: str, language, detailed: bool, vocab: str = ""):
     with open(audio_path, "rb") as f:
         data = {"model": model, "response_format": "verbose_json", "temperature": "0"}
@@ -459,9 +488,12 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = "", words_out=N
             log.warning("Groq second-opinion ASR failed: %s", str(e)[:150])
     words = [(float(w["start"]), float(w["end"])) for w in d.get("words", []) if "start" in w]
     out = []
-    for x in d.get("segments", []):
+    raw = [x for x in d.get("segments", []) if x.get("text", "").strip() and float(x.get("no_speech_prob", 0)) < 0.8]
+    for i, x in enumerate(raw):
         text = x.get("text", "").strip()
-        if not text or float(x.get("no_speech_prob", 0)) >= 0.8:
+        if is_hallucination(text, i in (0, len(raw) - 1), float(x.get("no_speech_prob", 0)),
+                            float(x.get("avg_logprob", 0)), float(x.get("compression_ratio", 0))):
+            log.info("dropped a likely hallucination: %r", text[:60])
             continue
         a, b = float(x["start"]), float(x["end"])
         inside = [w for w in words if a - 0.05 <= (w[0] + w[1]) / 2 <= b + 0.05]
@@ -469,7 +501,7 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = "", words_out=N
             a, b = inside[0][0], inside[-1][1]
         out.append((a + SUB_DELAY, b + SUB_DELAY, text))
         if words_out is not None and inside:
-            words_out[(a + SUB_DELAY, b + SUB_DELAY)] = [(x + SUB_DELAY, y + SUB_DELAY) for x, y in inside]
+            words_out[(a + SUB_DELAY, b + SUB_DELAY)] = [(u + SUB_DELAY, v + SUB_DELAY) for u, v in inside]
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
     if DEBUG_TEXT:
         log.info("second opinion (%s): %s", other, alt[:400])
@@ -494,8 +526,11 @@ def transcribe(audio_path: str, language=None, vocab: str = "", words_out=None):
         word_timestamps=True,
     )
     out = []
-    for s in segments:
-        if not s.text.strip():
+    segs = [x for x in segments if x.text.strip()]
+    for i, s in enumerate(segs):
+        if is_hallucination(s.text, i in (0, len(segs) - 1), float(s.no_speech_prob or 0), float(s.avg_logprob or 0),
+                            float(s.compression_ratio or 0)):
+            log.info("dropped a likely hallucination: %r", s.text.strip()[:60])
             continue
         out.append((s.start, s.end, s.text.strip()))
         if words_out is not None and getattr(s, "words", None):
@@ -866,8 +901,42 @@ def wrap2(line: str, max_chars: int) -> str:
     return f"{best[0]}\n{best[1]}" if best else line
 
 
+MIN_CUE = 0.6   # seconds: a one-line cue shorter than this is hard to read, so the segment keeps two lines instead
+
+
+def _plan_cues(words, start, end, limit, sw):
+    """Cuts one spoken segment into cues of at most `limit` characters. Returns [(t, duration, line, p0, p1)] where p0..p1 is
+    the share of the text. With real word times (sw) the cuts fall where the speaker says the words; otherwise by text length."""
+    chunks, cur, n = [], [], 0
+    for w in words:
+        add = len(w) + (1 if cur else 0)
+        if cur and n + add > limit:
+            chunks.append(cur)
+            cur, n = [w], len(w)
+        else:
+            cur.append(w)
+            n += add
+    if cur:
+        chunks.append(cur)
+    total = sum(len(" ".join(c)) for c in chunks) or 1
+    t, dur, cum, plan = start, end - start, 0, []
+    for k, c in enumerate(chunks):
+        line = " ".join(c)
+        d = dur * len(line) / total
+        if len(sw) >= 2 and len(chunks) > 1:
+            nw = len(sw)
+            i0 = min(nw - 1, round(nw * cum / total))
+            i1 = max(i0 + 1, min(nw, round(nw * (cum + len(line)) / total)))
+            t = start if k == 0 else max(sw[i0][0], t)
+            d = max(0.2, (end if k == len(chunks) - 1 else sw[i1 - 1][1]) - t)
+        plan.append((t, d, line, cum / total, (cum + len(line)) / total))
+        cum += len(line)
+        t += d
+    return plan
+
+
 def make_cues(segments, max_chars: int, origs=None, wmap=None):
-    """Split long segments into several timed cues of at most two short lines.
+    """Timed cues, one line each when the timing allows it, otherwise two tidy balanced lines.
     origs (optional): original-language text per segment, added as small marked lines (\\x01) under the translation."""
     cues = []
     for idx, (start, end, text) in enumerate(segments):
@@ -875,40 +944,28 @@ def make_cues(segments, max_chars: int, origs=None, wmap=None):
         if not words:
             continue
         ow = origs[idx].split() if origs and origs[idx] else []
-        chunks, cur, n = [], [], 0
-        for w in words:
-            add = len(w) + (1 if cur else 0)
-            if cur and n + add > 2 * max_chars:
-                chunks.append(cur)
-                cur, n = [w], len(w)
-            else:
-                cur.append(w)
-                n += add
-        if cur:
-            chunks.append(cur)
-        total = sum(len(" ".join(c)) for c in chunks) or 1
-        t, dur, cum = start, end - start, 0
-        sw = (wmap or {}).get((start, end)) or []      # real word times of the spoken segment (source language)
-        for k, c in enumerate(chunks):
-            line = " ".join(c)
-            d = dur * len(line) / total
-            if len(sw) >= 2 and len(chunks) > 1:      # cut where the speaker really says it, not by text length
-                nw = len(sw)
-                i0 = min(nw - 1, round(nw * cum / total))
-                i1 = max(i0 + 1, min(nw, round(nw * (cum + len(line)) / total)))
-                t = start if k == 0 else max(sw[i0][0], t)
-                d = max(0.2, (end if k == len(chunks) - 1 else sw[i1 - 1][1]) - t)
+        sw = (wmap or {}).get((start, end)) or []
+        plan = _plan_cues(words, start, end, max_chars, sw)                    # one line per cue
+        if len(plan) > 1 and (len(sw) < 2 or min(d for _, d, _, _, _ in plan) < MIN_CUE):
+            plan = _plan_cues(words, start, end, 2 * max_chars, sw)            # timing too coarse: keep two lines
+        for t, d, line, p0, p1 in plan:
             txt = wrap2(line, max_chars)
-            lo = round(len(ow) * cum / total) if ow else 0
-            cum += len(line)
             if ow:
-                hi = round(len(ow) * cum / total)
-                oline = " ".join(ow[lo:hi])
+                oline = " ".join(ow[round(len(ow) * p0):round(len(ow) * p1)])
                 if oline:
                     txt += "\n" + "\n".join("\x01" + x for x in wrap2(oline, int(max_chars * 1.4)).split("\n"))
             cues.append((t, t + d, txt))
-            t += d
     return cues
+
+
+def dedupe_repeats(text: str) -> str:
+    """'هاملن هاملن' -> 'هاملن': a word of 4+ letters repeated right after itself is almost always a recognition glitch."""
+    out = []
+    for w in text.split():
+        if out and len(w) >= 4 and w == out[-1]:
+            continue
+        out.append(w)
+    return " ".join(out)
 
 
 def fix_overlaps(cues, gap=0.04, min_show=0.35):
@@ -2134,7 +2191,7 @@ async def process(bot, chat_id: int, job: dict, status):
                 await notify_admin(bot, "⚠️ حصة Groq للترجمة المجانية وصلت حدّها (429). البوت يستخدم نموذجًا احتياطيًا.", key="groq-llm-429")
 
             keep_joiners = tgt in ("fa", "ur")
-            segments = [(s, e, clean_text(t, keep_joiners)) for s, e, t in segments]
+            segments = [(s, e, dedupe_repeats(clean_text(t, keep_joiners))) for s, e, t in segments]
             if tgt in ARABIC_SCRIPT:
                 raw_odd = odd_chars(" ".join(t for _, _, t in segments))
                 segments = [(s, e, normalize_ar(t)) for s, e, t in segments]
