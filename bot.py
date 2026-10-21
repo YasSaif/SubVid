@@ -1045,6 +1045,68 @@ def _plan_cues(words, start, end, limit, sw):
     return plan
 
 
+def _norm_tok(w: str) -> str:
+    return re.sub(r"[^\w]", "", w.lower())
+
+
+def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_name: str):
+    """The 'brain': a language model cuts every translated sentence into film-style subtitle cues (complete meaningful
+    clauses) and cuts the source sentence at the same places, so the timing comes from the real word times.
+    Returns a list of cues (start, end, text) per sentence, or None for a sentence it could not split safely."""
+    hard = 2 * max_chars
+    system = (
+        f"You are a professional film subtitler. For each item you get a sentence in {src_name} (\"s\") and its translation "
+        f"into {tgt_name} (\"t\"). Cut BOTH into the same number of subtitle cues, the way cinema subtitles are cut: every cue is "
+        "a complete, meaningful clause or phrase that can be read on its own; never end a cue on a preposition, conjunction, "
+        "article or the first half of a name, and never separate a verb from its object or a noun from its adjective. "
+        f"A cue may hold at most {hard} characters of the translation (hard limit), and ideally {max_chars} or fewer when the "
+        "meaning stays whole. Prefer FEWER, more meaningful cues over many tiny ones; a short sentence stays as ONE cue. "
+        "Do not change, add or drop any word: concatenating the cues must give exactly the original \"s\" and exactly the "
+        "original \"t\", in order. "
+        'Return JSON {"r": [[{"s": "...", "t": "..."}, ...], ...]} with one list of cues per item, same order.')
+    out = [None] * len(src_segs)
+    todo = [i for i in range(len(src_segs)) if src_segs[i][2].strip() and tr_segs[i][2].strip()]
+    for k in range(0, len(todo), 8):
+        ids = todo[k:k + 8]
+        try:
+            res = _llm_json(system, {"items": [{"s": src_segs[i][2], "t": tr_segs[i][2]} for i in ids]}, 90).get("r")
+        except Exception as e:
+            log.warning("semantic cue split failed: %s", str(e)[:150])
+            continue
+        if not isinstance(res, list) or len(res) != len(ids):
+            continue
+        for i, pieces in zip(ids, res):
+            try:
+                a, b, _ = src_segs[i]
+                sw = src_segs[i][2].split()
+                tw = tr_segs[i][2].split()
+                ps = [(str(x["s"]).split(), str(x["t"]).split()) for x in pieces]
+                if [_norm_tok(w) for p in ps for w in p[0]] != [_norm_tok(w) for w in sw]:
+                    continue
+                if [w for p in ps for w in p[1]] != tw or any(not p[0] or not p[1] for p in ps):
+                    continue
+                if any(len(" ".join(p[1])) > hard + 4 for p in ps):
+                    continue
+                wl = (wmap or {}).get((a, b)) or []
+                if len(wl) != len(sw):
+                    wl = []
+                cues, n0 = [], 0
+                total = len(sw)
+                for ps_s, ps_t in ps:
+                    n1 = n0 + len(ps_s)
+                    if wl:
+                        t0, t1 = wl[n0][0], wl[n1 - 1][1]
+                    else:
+                        t0, t1 = a + (b - a) * n0 / total, a + (b - a) * n1 / total
+                    line = " ".join(ps_t)
+                    cues.append((t0, max(t1, t0 + 0.3), wrap2(line, max_chars) if len(line) > max_chars else line))
+                    n0 = n1
+                out[i] = cues
+            except Exception:
+                continue
+    return out
+
+
 def make_cues(segments, max_chars: int, origs=None, wmap=None):
     """Timed cues, one line each when the timing allows it, otherwise two tidy balanced lines.
     origs (optional): original-language text per segment, added as small marked lines (\\x01) under the translation."""
@@ -2339,7 +2401,16 @@ async def process(bot, chat_id: int, job: dict, status):
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
             max_chars = chars_per_line(w, h, job, duration) if mode == "sub" else 40
-            planned = make_cues(segments, max_chars, origs, words_out)
+            planned = []
+            sem = None
+            if mode == "sub" and not origs and lang != tgt and GROQ_API_KEY and len(segments) == len(src_segments):
+                sem = await asyncio.to_thread(split_cues_llm, src_segments, segments, words_out, max_chars,
+                                              names.get(lang, lang), names.get(tgt, tgt))
+            for k, seg in enumerate(segments):
+                if sem and sem[k]:
+                    planned += sem[k]
+                else:
+                    planned += make_cues([seg], max_chars, [origs[k]] if origs else None, words_out)
             cues = fix_overlaps(planned)
             if dbg:
                 LAST_DEBUG.clear()
