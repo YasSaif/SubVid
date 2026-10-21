@@ -89,7 +89,15 @@ BURN_PRESET = os.environ.get("BURN_PRESET", "ultrafast")  # ultrafast = fastest 
 SS = max(1, min(3, int(os.environ.get("SUB_SUPERSAMPLE", "1"))))  # render subtitles at SSx size, then shrink (avoids glyph boxes at tiny sizes)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or 0)   # your Telegram numeric id (send /id to the bot); receives error alerts
 START_TIME = time.time()
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
+def _secret(name: str):
+    """Keys saved from Telegram with /setgroq live in secrets.json next to the code (overrides the environment)."""
+    try:
+        return json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8")).get(name) or None
+    except Exception:
+        return None
+
+
+GROQ_API_KEY = _secret("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
 SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.12"))  # seconds subtitles are shifted later (text was appearing before the voice)
@@ -3081,6 +3089,42 @@ async def cmd_localapi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(msg.chat_id, f"✅ تم حفظ المفاتيح، وحذفت رسالتك. السيرفر المحلي: {state}.")
 
 
+async def cmd_setgroq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: /setgroq <key> saves a new Groq key, deletes the message, tests the key and uses it at once."""
+    global GROQ_API_KEY
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    key = "".join((context.args or [""])[0].split()).strip("'\"")
+    try:
+        await msg.delete()
+    except TelegramError:
+        pass
+    if not key.startswith("gsk_") or len(key) < 30:
+        await context.bot.send_message(msg.chat_id, "الصيغة: /setgroq gsk_xxxxx (المفتاح يبدأ بـ gsk_)")
+        return
+
+    def _test():
+        return httpx.get("https://api.groq.com/openai/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=20).status_code
+
+    try:
+        code = await asyncio.to_thread(_test)
+    except Exception as e:
+        await context.bot.send_message(msg.chat_id, f"⚠️ ما قدرت أتحقق من المفتاح ({type(e).__name__}). لم يُحفظ.")
+        return
+    if code != 200:
+        await context.bot.send_message(msg.chat_id, f"❌ المفتاح مرفوض من Groq (HTTP {code}). انسخه من جديد من console.groq.com. لم يُحفظ.")
+        return
+    try:
+        d = json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    d["GROQ_API_KEY"] = key
+    (BASE_DIR / "secrets.json").write_text(json.dumps(d), encoding="utf-8")
+    GROQ_API_KEY = key
+    await context.bot.send_message(msg.chat_id, "✅ المفتاح صحيح، حُفظ وبدأ استخدامه الآن، وحذفت رسالتك.")
+
+
 BUILD_SCRIPT = r"""
 set -ex
 export DEBIAN_FRONTEND=noninteractive
@@ -3296,6 +3340,7 @@ def main():
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("localapi", cmd_localapi))
     app.add_handler(CommandHandler("buildlocal", cmd_buildlocal))
+    app.add_handler(CommandHandler("setgroq", cmd_setgroq))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(

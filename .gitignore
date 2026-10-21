@@ -2,3 +2,4 @@ localapi.json
 .switched_to_local
 __pycache__/
 bin/
+secrets.json
