@@ -9,6 +9,7 @@ import asyncio
 import base64
 import collections
 import gc
+import math
 import json
 import logging
 import os
@@ -92,7 +93,7 @@ START_TIME = time.time()
 def _secret(name: str):
     """Keys saved from Telegram with /setgroq live in secrets.json next to the code (overrides the environment)."""
     try:
-        return json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8")).get(name) or None
+        return json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8")).get(name)
     except Exception:
         return None
 
@@ -100,7 +101,7 @@ def _secret(name: str):
 GROQ_API_KEY = _secret("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
-SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.06"))  # seconds subtitles are shifted later (text was appearing before the voice)
+SUB_DELAY = float(_secret("SUB_DELAY") if _secret("SUB_DELAY") is not None else os.environ.get("SUB_DELAY", "0.06"))  # seconds subtitles are shifted later (text was appearing before the voice)
 GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
 GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")  # llama-3.3-70b gave model_not_found on this account
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
@@ -486,7 +487,7 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = "", words_out=N
             alt = _groq_asr(audio_path, other, language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower()), detailed=False, vocab=vocab).get("text", "").strip()
         except Exception as e:
             log.warning("Groq second-opinion ASR failed: %s", str(e)[:150])
-    words = [(float(w["start"]), float(w["end"])) for w in d.get("words", []) if "start" in w]
+    words = [(float(w["start"]), float(w["end"]), str(w.get("word", ""))) for w in d.get("words", []) if "start" in w]
     out = []
     raw = [x for x in d.get("segments", []) if x.get("text", "").strip() and float(x.get("no_speech_prob", 0)) < 0.8]
     for i, x in enumerate(raw):
@@ -501,7 +502,7 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = "", words_out=N
             a, b = inside[0][0], inside[-1][1]
         out.append((a + SUB_DELAY, b + SUB_DELAY, text))
         if words_out is not None and inside:
-            words_out[(a + SUB_DELAY, b + SUB_DELAY)] = [(u + SUB_DELAY, v + SUB_DELAY) for u, v in inside]
+            words_out[(a + SUB_DELAY, b + SUB_DELAY)] = [(u + SUB_DELAY, v + SUB_DELAY, t) for u, v, t in inside]
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
     if DEBUG_TEXT:
         log.info("second opinion (%s): %s", other, alt[:400])
@@ -534,7 +535,7 @@ def transcribe(audio_path: str, language=None, vocab: str = "", words_out=None):
             continue
         out.append((s.start, s.end, s.text.strip()))
         if words_out is not None and getattr(s, "words", None):
-            words_out[(s.start, s.end)] = [(w.start, w.end) for w in s.words]
+            words_out[(s.start, s.end)] = [(w.start, w.end, w.word) for w in s.words]
     return out, info.language, ""
 
 
@@ -887,18 +888,94 @@ def odd_chars(text: str) -> str:
     return "; ".join(list(seen.values())[:12])
 
 
+_END_BAD = {  # a line/cue should not end with these (they belong to the next word)
+    "في", "على", "من", "إلى", "الى", "عن", "مع", "بين", "حتى", "عبر", "خلال", "نحو", "ذلك", "هذا", "هذه", "أن", "ان", "إن",
+    "لم", "لن", "لا", "ما", "قد", "كل", "بعد", "قبل", "عند", "ضد", "منذ", "حول", "لدى", "أو", "او", "ثم", "و", "ب", "ل",
+    "the", "a", "an", "of", "to", "in", "on", "at", "for", "with", "and", "or", "but", "that", "is", "are", "was", "by",
+    "from", "as", "this", "these", "those", "his", "her", "their", "our", "my", "your", "its", "not", "de", "la", "el", "en",
+}
+_TITLES = {  # keep a title together with the name that follows
+    "اللواء", "الركن", "الدكتور", "الشيخ", "الأمير", "الملك", "الرئيس", "وزير", "المتحدث", "الجنرال", "العميد", "المقدم",
+    "الفريق", "السيد", "الأستاذ", "المهندس", "الكابتن", "mr", "mrs", "dr", "general", "president", "king", "prince",
+}
+_CONJ_START = {"ثم", "لكن", "حيث", "مما", "الذي", "التي", "الذين", "بينما", "أو", "إلا", "كما", "لأن", "عندما", "بعدما",
+               "and", "but", "which", "because", "while", "when", "then", "so"}
+_PUNCT_END = ".,;:!?،؛؟…"
+
+
+def break_cost(prev: str, nxt: str) -> float:
+    """How bad it is to cut a subtitle between these two words (lower = better place to cut)."""
+    c = 0.0
+    if prev and prev[-1] in _PUNCT_END:
+        c -= 2.0
+    p = prev.strip(_PUNCT_END + "\"'()[]").lower()
+    n = nxt.strip(_PUNCT_END + "\"'()[]").lower()
+    if p in _END_BAD or p in _TITLES:
+        c += 2.0
+    if n in _CONJ_START or (len(n) > 3 and n[0] == "و" and "\u0600" <= n[0] <= "\u06ff"):
+        c -= 0.8
+    return c
+
+
 def wrap2(line: str, max_chars: int) -> str:
-    """Wrap into at most two balanced lines."""
+    """Wrap into at most two balanced lines, cutting at a natural place (not after a preposition, not inside a title)."""
     if len(line) <= max_chars:
         return line
     words = line.split()
-    best, best_diff = None, None
+    best = None
     for i in range(1, len(words)):
         a, b = " ".join(words[:i]), " ".join(words[i:])
-        diff = abs(len(a) - len(b))
-        if best_diff is None or diff < best_diff:
-            best, best_diff = (a, b), diff
-    return f"{best[0]}\n{best[1]}" if best else line
+        cost = abs(len(a) - len(b)) / max(1, len(line)) * 4 + break_cost(words[i - 1], words[i])
+        if best is None or cost < best[0]:
+            best = (cost, a, b)
+    return f"{best[1]}\n{best[2]}" if best else line
+
+
+def chunk_words(words, limit: int, start: float, end: float, sw):
+    """Cuts a word list into cues of at most `limit` characters at natural places, with even sizes and no orphan words.
+    Returns [(j, i)] index ranges. sw (real word times) lets it avoid cues that would be too short to read."""
+    n = len(words)
+    pref = [0]
+    for w in words:
+        pref.append(pref[-1] + len(w) + 1)
+
+    def L(j, i):
+        return pref[i] - pref[j] - 1
+
+    total = L(0, n)
+    if total <= limit:
+        return [(0, n)]
+    target = total / math.ceil(total / limit)
+    nw = len(sw)
+
+    def t_at(i):
+        if i >= n:
+            return end
+        return sw[min(nw - 1, round(i * nw / n))][0] if nw >= 2 else start + (end - start) * i / n
+
+    INF = float("inf")
+    dp, prev = [INF] * (n + 1), [-1] * (n + 1)
+    dp[0] = 0.0
+    for i in range(1, n + 1):
+        for j in range(i - 1, -1, -1):
+            l = L(j, i)
+            if l > limit and i - j > 1:
+                break
+            c = ((l - target) / limit) ** 2 * 8 + 1.0
+            if i < n:
+                c += break_cost(words[i - 1], words[i])
+            if i - j == 1 and l < 0.4 * limit:
+                c += 3.0
+            d = t_at(i) - t_at(j)
+            if d < 0.8:
+                c += (0.8 - d) * 4
+            if dp[j] + c < dp[i]:
+                dp[i], prev[i] = dp[j] + c, j
+    out, i = [], n
+    while i > 0:
+        out.append((prev[i], i))
+        i = prev[i]
+    return out[::-1]
 
 
 MIN_CUE = 0.6   # seconds: a one-line cue shorter than this is hard to read, so the segment keeps two lines instead
@@ -907,17 +984,8 @@ MIN_CUE = 0.6   # seconds: a one-line cue shorter than this is hard to read, so 
 def _plan_cues(words, start, end, limit, sw):
     """Cuts one spoken segment into cues of at most `limit` characters. Returns [(t, duration, line, p0, p1)] where p0..p1 is
     the share of the text. With real word times (sw) the cuts fall where the speaker says the words; otherwise by text length."""
-    chunks, cur, n = [], [], 0
-    for w in words:
-        add = len(w) + (1 if cur else 0)
-        if cur and n + add > limit:
-            chunks.append(cur)
-            cur, n = [w], len(w)
-        else:
-            cur.append(w)
-            n += add
-    if cur:
-        chunks.append(cur)
+    ranges = chunk_words(words, limit, start, end, sw)
+    chunks = [words[j:i] for j, i in ranges]
     total = sum(len(" ".join(c)) for c in chunks) or 1
     t, dur, cum, plan = start, end - start, 0, []
     for k, c in enumerate(chunks):
@@ -946,7 +1014,7 @@ def make_cues(segments, max_chars: int, origs=None, wmap=None):
         ow = origs[idx].split() if origs and origs[idx] else []
         sw = (wmap or {}).get((start, end)) or []
         plan = _plan_cues(words, start, end, max_chars, sw)                    # one line per cue
-        if len(plan) > 1 and (len(sw) < 2 or min(d for _, d, _, _, _ in plan) < MIN_CUE):
+        if len(plan) > 1 and (len(sw) < 2 or sum(d for _, d, _, _, _ in plan) / len(plan) < MIN_CUE):
             plan = _plan_cues(words, start, end, 2 * max_chars, sw)            # timing too coarse: keep two lines
         for t, d, line, p0, p1 in plan:
             txt = wrap2(line, max_chars)
@@ -2167,6 +2235,9 @@ async def process(bot, chat_id: int, job: dict, status):
             await prog.step("tr")
             words_out: dict = {}
             segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"], "", words_out)
+            dbg = bool(ADMIN_ID and job.get("uid") == ADMIN_ID)   # /debug report only for the owner's own videos
+            raw_segments = list(segments)
+            vad_regions = await asyncio.to_thread(speech_regions, str(audio)) if dbg else []
             st.mark("transcribe")
             if DEBUG_TEXT:   # transcripts are private: only logged when DEBUG_TEXT=1 is set on Render
                 log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
@@ -2227,7 +2298,13 @@ async def process(bot, chat_id: int, job: dict, status):
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
             max_chars = chars_per_line(w, h, job, duration) if mode == "sub" else 40
-            cues = fix_overlaps(make_cues(segments, max_chars, origs, words_out))
+            planned = make_cues(segments, max_chars, origs, words_out)
+            cues = fix_overlaps(planned)
+            if dbg:
+                LAST_DEBUG.clear()
+                LAST_DEBUG.update(dict(lang=lang, tgt=tgt, duration=duration, size=(w, h), delay=SUB_DELAY, max_chars=max_chars,
+                                       alt=alt, raw=raw_segments, words=dict(words_out), src=list(src_segments),
+                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
             (workdir / "subs_tagged.srt").write_text(build_srt(cues, keep_marks=True), encoding="utf-8")
@@ -3199,6 +3276,115 @@ async def cmd_setgroq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(msg.chat_id, "✅ المفتاح صحيح، حُفظ وبدأ استخدامه الآن، وحذفت رسالتك.")
 
 
+LAST_DEBUG: dict = {}
+
+
+def speech_regions(path: str):
+    """Where the audio really contains speech (Silero VAD that ships with faster-whisper): [(start, end)] seconds."""
+    try:
+        from faster_whisper.audio import decode_audio
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+        audio = decode_audio(path, sampling_rate=16000)
+        ts = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=300))
+        return [(x["start"] / 16000, x["end"] / 16000) for x in ts]
+    except Exception as e:
+        log.warning("speech detection failed: %s", str(e)[:150])
+        return []
+
+
+def _tm(t: float) -> str:
+    return f"{int(t // 60)}:{t % 60:05.2f}"
+
+
+def build_debug_report(d: dict) -> str:
+    L = [f"SubVid debug report - {d['lang']} -> {d['tgt']}, {_tm(d['duration'])} ({d['size'][0]}x{d['size'][1]}), "
+         f"delay={d['delay']}s, chars/line={d['max_chars']}", ""]
+    # 1. raw transcript with word times
+    L.append("=== 1. RAW TRANSCRIPT (what the speech model heard) ===")
+    for a, b, t in d["raw"]:
+        L.append(f"[{_tm(a)}-{_tm(b)}] {t}")
+        ws = d["words"].get((a, b)) or []
+        if ws:
+            L.append("    " + " ".join(f"{w[2].strip()}@{w[0]:.2f}" for w in ws))
+    # 2. second model
+    L += ["", "=== 2. SECOND MODEL (other Whisper version) - words that differ ==="]
+    norm = lambda x: re.findall(r"\w+", _norm_h(x))
+    main_words = [w for _, _, t in d["raw"] for w in norm(t)]
+    alt_words = norm(d["alt"]) if d["alt"] else []
+    if alt_words:
+        ms, as_ = set(main_words), set(alt_words)
+        L.append("only in the second model (maybe missed by the first): " + (" ".join(sorted(as_ - ms)) or "-"))
+        L.append("only in the first model: " + (" ".join(sorted(ms - as_)) or "-"))
+    else:
+        L.append("(no second opinion available)")
+    # 3. speech without transcript
+    L += ["", "=== 3. SPEECH DETECTED IN THE AUDIO BUT NOT TRANSCRIBED ==="]
+    spans = [(ws[0][0], ws[-1][1]) for ws in d["words"].values() if ws] or [(a, b) for a, b, _ in d["raw"]]
+    gaps = []
+    for a, b in d["vad"]:
+        t = a
+        for x, y in sorted(spans):
+            if y <= t:
+                continue
+            if x >= b:
+                break
+            if x - t > 0.5:
+                gaps.append((t, min(x, b)))
+            t = max(t, y)
+        if b - t > 0.5:
+            gaps.append((t, b))
+    L += [f"{_tm(a)}-{_tm(b)} ({b - a:.1f}s)" for a, b in gaps] or ["none (or speech detection unavailable)" if not d["vad"] else "none"]
+    # 4. translation per segment
+    L += ["", "=== 4. TRANSLATION PER SEGMENT (! = suspiciously short / missing words) ==="]
+    for (a, b, src), (_, _, tr) in zip(d["src"], d["final"]):
+        ratio = len(tr.split()) / max(1, len(src.split()))
+        L.append(f"[{_tm(a)}] {'!' if ratio < 0.55 else ' '} {src}\n          -> {tr}")
+    if len(d["src"]) != len(d["final"]):
+        L.append(f"(note: {len(d['src'])} source lines but {len(d['final'])} translated lines)")
+    # 5. cues
+    L += ["", "=== 5. FINAL SUBTITLES (shift = how much later than planned) ==="]
+    for (a, b, t), (pa, _, _) in zip(d["cues"], d["planned"]):
+        sh = a - pa
+        L.append(f"[{a:6.2f}-{b:6.2f}] {'shift %+.2fs ' % sh if abs(sh) >= 0.1 else ''}{t.replace(chr(1), '').replace(chr(10), ' / ')}")
+    return "\n".join(L)
+
+
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: report about the last video you sent yourself (what was heard, translated, and when it is shown)."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    if not LAST_DEBUG:
+        await update.effective_message.reply_text("ما فيه تقرير بعد. أرسل فيديو بنفسك أولًا ثم أرسل /debug.")
+        return
+    text = await asyncio.to_thread(build_debug_report, dict(LAST_DEBUG))
+    await update.effective_message.reply_document(document=text.encode("utf-8"), filename="subvid-debug.txt")
+
+
+async def cmd_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: /delay 0.15 shifts all subtitles later (negative = earlier), in seconds. Applies to the next videos."""
+    global SUB_DELAY
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    if not context.args:
+        await msg.reply_text(f"التأخير الحالي: {SUB_DELAY:+.2f} ثانية.\nلتغييره: /delay 0.15 (موجب = الترجمة تتأخر، سالب = تتقدم)")
+        return
+    try:
+        v = float(context.args[0].replace(",", "."))
+    except ValueError:
+        await msg.reply_text("الصيغة: /delay 0.15")
+        return
+    v = max(-1.0, min(1.0, v))
+    try:
+        d = json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    d["SUB_DELAY"] = v
+    (BASE_DIR / "secrets.json").write_text(json.dumps(d), encoding="utf-8")
+    SUB_DELAY = v
+    await msg.reply_text(f"✅ التأخير صار {v:+.2f} ثانية للفيديوهات القادمة.")
+
+
 BUILD_SCRIPT = r"""
 set -ex
 export DEBIAN_FRONTEND=noninteractive
@@ -3415,6 +3601,8 @@ def main():
     app.add_handler(CommandHandler("localapi", cmd_localapi))
     app.add_handler(CommandHandler("buildlocal", cmd_buildlocal))
     app.add_handler(CommandHandler("setgroq", cmd_setgroq))
+    app.add_handler(CommandHandler("debug", cmd_debug))
+    app.add_handler(CommandHandler("delay", cmd_delay))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
