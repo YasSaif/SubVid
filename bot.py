@@ -100,7 +100,7 @@ def _secret(name: str):
 GROQ_API_KEY = _secret("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
-SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.12"))  # seconds subtitles are shifted later (text was appearing before the voice)
+SUB_DELAY = float(os.environ.get("SUB_DELAY", "0.06"))  # seconds subtitles are shifted later (text was appearing before the voice)
 GROQ_PROMPT = os.environ.get("GROQ_PROMPT", "")  # optional: names/terms that appear in your clips
 GROQ_LLM_MODEL = os.environ.get("GROQ_LLM_MODEL", "openai/gpt-oss-120b")  # llama-3.3-70b gave model_not_found on this account
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # optional official Google Cloud Translation key
@@ -186,7 +186,7 @@ def font_scale(font: str, group: str) -> float:
 FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
-SIZES = [("size_s", 0.85), ("size_m", 1.2), ("size_l", 1.65)]
+SIZES = [("size_s", 1.02), ("size_m", 1.44), ("size_l", 1.98)]   # +20% (was 0.85 / 1.2 / 1.65)
 STYLES = ["classic", "box", "yellow", "yellowbox", "whitebox", "bluebox", "redbox",
           "green", "cyan", "orange", "pink", "thick", "shadow"]
 
@@ -437,7 +437,7 @@ def _groq_asr(audio_path: str, model: str, language, detailed: bool, vocab: str 
     return r.json()
 
 
-def transcribe_groq(audio_path: str, language=None, vocab: str = ""):
+def transcribe_groq(audio_path: str, language=None, vocab: str = "", words_out=None):
     """Returns (segments, language, second_opinion_text). The second model is used later to recover words the first one dropped."""
     d, last = None, None
     for model in (GROQ_ASR_MODEL, GROQ_ASR_FALLBACK):
@@ -468,17 +468,19 @@ def transcribe_groq(audio_path: str, language=None, vocab: str = ""):
         if inside:  # word timing is tighter than the segment edges -> subtitle matches the voice
             a, b = inside[0][0], inside[-1][1]
         out.append((a + SUB_DELAY, b + SUB_DELAY, text))
+        if words_out is not None and inside:
+            words_out[(a + SUB_DELAY, b + SUB_DELAY)] = [(x + SUB_DELAY, y + SUB_DELAY) for x, y in inside]
     lang = language or LANG_NAME_TO_CODE.get(str(d.get("language", "")).lower(), str(d.get("language", ""))[:2])
     if DEBUG_TEXT:
         log.info("second opinion (%s): %s", other, alt[:400])
     return out, lang, alt
 
 
-def transcribe(audio_path: str, language=None, vocab: str = ""):
+def transcribe(audio_path: str, language=None, vocab: str = "", words_out=None):
     """language=None -> auto-detect; otherwise skip detection (faster)."""
     if GROQ_API_KEY:
         try:
-            return transcribe_groq(audio_path, language, vocab)
+            return transcribe_groq(audio_path, language, vocab, words_out)
         except Exception as e:
             if "429" in str(e):   # free-tier limit: local Whisper on this tiny CPU would take forever
                 raise UserError("busy")
@@ -489,8 +491,15 @@ def transcribe(audio_path: str, language=None, vocab: str = ""):
         vad_filter=USE_VAD,
         condition_on_previous_text=False,
         language=language,
+        word_timestamps=True,
     )
-    out = [(s.start, s.end, s.text.strip()) for s in segments if s.text.strip()]
+    out = []
+    for s in segments:
+        if not s.text.strip():
+            continue
+        out.append((s.start, s.end, s.text.strip()))
+        if words_out is not None and getattr(s, "words", None):
+            words_out[(s.start, s.end)] = [(w.start, w.end) for w in s.words]
     return out, info.language, ""
 
 
@@ -857,7 +866,7 @@ def wrap2(line: str, max_chars: int) -> str:
     return f"{best[0]}\n{best[1]}" if best else line
 
 
-def make_cues(segments, max_chars: int, origs=None):
+def make_cues(segments, max_chars: int, origs=None, wmap=None):
     """Split long segments into several timed cues of at most two short lines.
     origs (optional): original-language text per segment, added as small marked lines (\\x01) under the translation."""
     cues = []
@@ -879,13 +888,20 @@ def make_cues(segments, max_chars: int, origs=None):
             chunks.append(cur)
         total = sum(len(" ".join(c)) for c in chunks) or 1
         t, dur, cum = start, end - start, 0
-        for c in chunks:
+        sw = (wmap or {}).get((start, end)) or []      # real word times of the spoken segment (source language)
+        for k, c in enumerate(chunks):
             line = " ".join(c)
             d = dur * len(line) / total
+            if len(sw) >= 2 and len(chunks) > 1:      # cut where the speaker really says it, not by text length
+                nw = len(sw)
+                i0 = min(nw - 1, round(nw * cum / total))
+                i1 = max(i0 + 1, min(nw, round(nw * (cum + len(line)) / total)))
+                t = start if k == 0 else max(sw[i0][0], t)
+                d = max(0.2, (end if k == len(chunks) - 1 else sw[i1 - 1][1]) - t)
             txt = wrap2(line, max_chars)
+            lo = round(len(ow) * cum / total) if ow else 0
+            cum += len(line)
             if ow:
-                lo = round(len(ow) * cum / total)
-                cum += len(line)
                 hi = round(len(ow) * cum / total)
                 oline = " ".join(ow[lo:hi])
                 if oline:
@@ -904,7 +920,7 @@ def fix_overlaps(cues, gap=0.04, min_show=0.35):
         want = max(b + 0.25, a + max(0.8, 0.045 * len(t)))   # hold: at least ~0.8 s or 45 ms per character
         if i + 1 < len(cues):
             limit = cues[i + 1][0] - gap
-            if limit - a >= min_show:
+            if limit - a >= 0.2:                            # a short cue is better than a late next one
                 want = min(want, limit)
             else:                                           # next one starts too soon: show this one briefly, delay the next
                 want = a + min_show
@@ -1066,7 +1082,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
     if align == 2:
-        margin_v = 22 if portrait else 12
+        margin_v = 10 if portrait else 8
     elif align == 8:
         margin_v = 30 if portrait else 12
     else:
@@ -2092,7 +2108,8 @@ async def process(bot, chat_id: int, job: dict, status):
                 raise UserError("too_long", m=max(1, int(limit * 24 * 1024 * 1024 / audio.stat().st_size)))
 
             await prog.step("tr")
-            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"])
+            words_out: dict = {}
+            segments, lang, alt = await asyncio.to_thread(transcribe, str(audio), job["src"], "", words_out)
             st.mark("transcribe")
             if DEBUG_TEXT:   # transcripts are private: only logged when DEBUG_TEXT=1 is set on Render
                 log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
@@ -2153,7 +2170,7 @@ async def process(bot, chat_id: int, job: dict, status):
             portrait = bool(w and h and h > w)
             mult = SIZES[job["size_i"]][1]
             max_chars = chars_per_line(w, h, job, duration) if mode == "sub" else 40
-            cues = fix_overlaps(make_cues(segments, max_chars, origs))
+            cues = fix_overlaps(make_cues(segments, max_chars, origs, words_out))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
             (workdir / "subs_tagged.srt").write_text(build_srt(cues, keep_marks=True), encoding="utf-8")
