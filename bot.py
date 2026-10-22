@@ -1320,7 +1320,7 @@ def chars_per_line(w: int, h: int, job: dict, duration: float = 0.0) -> int:
     px = base * SIZES[job["size_i"]][1] * font_scale(font, group) * oh / 288
     avail = ow * (1 - 40 / 384)                     # side margins are 20 of 384 units each
     if tgt in ARABIC_SCRIPT:
-        factor = 0.265                              # real renders: ~0.24 of the font px per Arabic char (worst case); small margin
+        factor = 0.25                               # real renders: ~0.22-0.24 of the font px per Arabic char; small margin
     elif tgt in CJK:
         factor = 1.0
     else:
@@ -1385,7 +1385,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
                                                                   max(5, round(font_size * 0.7 * k)))) + ln
                 fixed.append(ln)
             lines[2:] = fixed
-            lines[2] = "{\\an%d}" % align + lines[2]
+            lines[2] = "{\\an%d\\q2}" % align + lines[2]   # q2: never auto-wrap (no surprise third line)
         tagged.append("\n".join(lines))
     srt_name = "subs_burn.srt"
     (workdir / srt_name).write_text("\n\n".join(tagged) + "\n", encoding="utf-8")
@@ -2926,7 +2926,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 _LIVE_CACHE: dict = {}
-LIVE_SAMPLES = {"ar": ("مرحبا، كيف حالك؟", "ar"), "lat": ("Hello, how are you?", "lat")}
+LIVE_SAMPLES = {"ar": ("ومدن أخرى، مما أسفر عن وقوع إصابات وأضرار.", "ar"), "lat": ("And in the preceding weeks, Houthis launched missiles.", "lat")}
 
 
 async def live_frame(job: dict):
@@ -2948,13 +2948,13 @@ async def live_frame(job: dict):
     key = (group, font, job["size_i"], job["style_i"], job["pos_i"], sec_group)
     if key in _LIVE_CACHE:
         return _LIVE_CACHE[key]
-    W, H = 720, 900
+    W, H = 540, 960        # same 9:16 shape and same size-to-width ratio as the burnt video
     main = LIVE_SAMPLES[group][0]
     mult = SIZES[job["size_i"]][1]
-    fs = round(34 * mult * font_scale(font, group))
+    fs = round(12 * mult * font_scale(font, group) * H / 288)
     style_key = STYLES[job["style_i"] % len(STYLES)]
     an_pos = POSITIONS[job["pos_i"] % len(POSITIONS)][0]
-    ycen = {"pos_top": 170, "pos_middle": H // 2, "pos_bottom": H - 190}[an_pos]
+    ycen = {"pos_top": 150, "pos_middle": H // 2, "pos_bottom": H - 120}[an_pos]
     if sec_group:
         ycen -= round(fs * 0.5) if an_pos != "pos_top" else 0
     style = _ass_style_line("M", font, fs, STYLE_DEFS[style_key])
