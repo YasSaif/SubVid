@@ -1124,7 +1124,7 @@ DIAR_LIB = BASE_DIR / "pylib"
 _SEG_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
 _EMB_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
             "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx")
-_diar = {"sd": None, "state": "idle", "err": ""}
+_diar = {"sd": None, "state": "idle", "err": "", "th": float(os.environ.get("DIAR_THRESHOLD", "0.85"))}
 _diar_lock = threading.Lock()
 _diar_run = threading.Lock()
 
@@ -1178,7 +1178,7 @@ def diar_setup():
                 pyannote=so.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(seg)),
                 num_threads=int(BURN_THREADS)),
             embedding=so.SpeakerEmbeddingExtractorConfig(model=str(emb), num_threads=int(BURN_THREADS)),
-            clustering=so.FastClusteringConfig(num_clusters=-1, threshold=0.6),
+            clustering=so.FastClusteringConfig(num_clusters=-1, threshold=_diar["th"]),
             min_duration_on=0.3, min_duration_off=0.5)
         if not cfg.validate():
             raise RuntimeError("diarization config invalid")
@@ -1206,8 +1206,9 @@ def diarize(audio_path: str):
     return [(float(r.start), float(r.end), int(r.speaker)) for r in res]
 
 
-def dialogue_info(turns, min_share=0.12, min_turns=2):
-    """Decides whether this is a conversation. Strict on purpose: it is better to miss a dialogue than to invent one."""
+def dialogue_info(turns, min_speech=2.0, min_turns=2):
+    """Decides whether this is a conversation. Counts real speaker changes between consecutive stretches of speech;
+    speakers heard for less than min_speech seconds in total are ignored (noise, music, crowd)."""
     merged = []
     for a, b, sp in turns:
         if merged and merged[-1][2] == sp and a - merged[-1][1] < 1.0:
@@ -1217,11 +1218,10 @@ def dialogue_info(turns, min_share=0.12, min_turns=2):
     share: dict = {}
     for a, b, sp in merged:
         share[sp] = share.get(sp, 0.0) + (b - a)
-    tot = sum(share.values())
-    big = {sp for sp, v in share.items() if tot and v / tot >= min_share and v >= 3.0}
-    changes = sum(1 for i in range(1, len(merged))
-                  if merged[i][2] != merged[i - 1][2] and merged[i][2] in big and merged[i - 1][2] in big)
-    return (len(big) >= 2 and changes >= min_turns), merged, share
+    real = {sp for sp, v in share.items() if v >= min_speech}
+    seq = [m[2] for m in merged if m[2] in real]
+    changes = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
+    return (len(real) >= 2 and changes >= min_turns), merged, share
 
 
 def speaker_of(a: float, b: float, turns):
@@ -3693,11 +3693,22 @@ async def cmd_diar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin only: status of automatic dialogue detection (and a retry of its setup)."""
     if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
         return
+    if context.args:
+        try:
+            th = float(context.args[0])
+            assert 0.2 <= th <= 1.5
+        except Exception:
+            await update.effective_message.reply_text("الاستخدام: /diar 0.85  (أكبر = أصوات أقل مدموجة أكثر، أصغر = يفرّق أصوات أكثر)")
+            return
+        _diar["th"], _diar["sd"], _diar["state"] = th, None, "idle"
+        threading.Thread(target=diar_setup, daemon=True).start()
+        await update.effective_message.reply_text(f"حد التمييز بين الأصوات الآن {th}. يُطبّق خلال ثوانٍ على الفيديوهات القادمة.")
+        return
     if _diar["state"] in ("error", "idle") and DIAR_ON:
         threading.Thread(target=diar_setup, daemon=True).start()
         await update.effective_message.reply_text(f"كشف الحوار: {_diar['state']} {_diar['err']}\nأعدت المحاولة الآن، أرسل /diar بعد دقيقتين.")
         return
-    await update.effective_message.reply_text(f"كشف الحوار: {_diar['state']} {_diar['err']}")
+    await update.effective_message.reply_text(f"كشف الحوار: {_diar['state']} {_diar['err']} (الحد {_diar['th']})")
 
 
 async def cmd_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
