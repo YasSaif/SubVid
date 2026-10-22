@@ -1251,6 +1251,41 @@ def apply_dialogue(cues, turns, max_gap: float = 1.5):
     return out
 
 
+def label_speakers_llm(src_segs, turns):
+    """The brain for dialogue: reads the sentences in order and decides who says each one (questions and answers, replies,
+    I/you), using the audio model's guess only as a hint, because audio can merge two similar voices.
+    Returns [(start, end, label)] per sentence, or None."""
+    if len(src_segs) < 3:
+        return None
+    items = []
+    for k, (a, b, t) in enumerate(src_segs):
+        hint = speaker_of(a, b, turns) if turns else None
+        it = {"i": k, "t": t[:300]}
+        if hint is not None:
+            it["a"] = hint
+        items.append(it)
+    system = (
+        "You get the sentences of a video transcript in order. Decide which speaker says each sentence. "
+        "Some items have \"a\": a speaker id guessed by an audio model; it is only a hint and can be wrong (it may merge two similar "
+        "voices into one, or split one voice into two). Use the meaning: a question followed by an answer, a reply, a change of "
+        "point of view (I / you), greetings, a lesson dialogue between two people. If it is a monologue (one person: news, "
+        "lecture, narration, vlog, voice-over), give every sentence label 0. Be conservative: start a new speaker only when it is "
+        "clear. Label speakers 0, 1, 2 in order of first appearance. "
+        'Return JSON {"s": [integer, ...]} with exactly one label per item, in the same order.')
+    try:
+        res = _llm_json(system, {"items": items}, 90).get("s")
+    except Exception as e:
+        log.warning("speaker labelling failed: %s", str(e)[:150])
+        return None
+    if not isinstance(res, list) or len(res) != len(src_segs):
+        return None
+    try:
+        labels = [int(x) for x in res]
+    except Exception:
+        return None
+    return [(a, b, lab) for (a, b, _), lab in zip(src_segs, labels)]
+
+
 def supervise_cues(cues, max_chars: int):
     """The supervisor: checks every cue before it is burnt: ONE line each; a cue that is too long is split in two at the
     best place (time shared by length)."""
@@ -2549,6 +2584,9 @@ async def process(bot, chat_id: int, job: dict, status):
             segments = apply_glossary(segments, gl)
             segments, words_out = merge_sentences(segments, words_out)   # translate and show whole sentences
             src_segments = segments
+            spk_llm = None
+            if DIAR_ON and mode == "sub" and GROQ_API_KEY and not job.get("bi"):
+                spk_llm = await asyncio.to_thread(label_speakers_llm, list(src_segments), turns)
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
             if lang != tgt or GROQ_API_KEY:
@@ -2611,8 +2649,9 @@ async def process(bot, chat_id: int, job: dict, status):
                     planned += make_cues([seg], max_chars, [origs[k]] if origs else None, words_out)
             planned = supervise_cues(planned, max_chars)
             dlg = None
-            if turns:
-                dlg = dialogue_info(turns)
+            use_turns = [(a, b, l) for a, b, l in spk_llm] if spk_llm else turns     # the language model decides; audio is the fallback
+            if use_turns:
+                dlg = dialogue_info(use_turns)
                 if dlg[0] and not origs:
                     planned = apply_dialogue(planned, dlg[1])
             cues = fix_overlaps(planned)
@@ -2620,7 +2659,7 @@ async def process(bot, chat_id: int, job: dict, status):
                 LAST_DEBUG.clear()
                 LAST_DEBUG.update(dict(lang=lang, tgt=tgt, duration=duration, size=(w, h), delay=SUB_DELAY, max_chars=max_chars,
                                        alt=alt, raw=raw_segments, words=dict(words_out), src=list(src_segments),
-                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions, dlg=dlg,
+                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions, dlg=dlg, spk_llm=spk_llm, audio_turns=turns,
                                        diar_state=_diar['state'] + (' ' + _diar['err'] if _diar['err'] else '')))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
@@ -3675,6 +3714,12 @@ def build_debug_report(d: dict) -> str:
                  f"speakers={len(share)}; speech seconds per speaker: " + ", ".join(f"#{k}={v:.1f}s" for k, v in sorted(share.items())))
         for a, b, sp in merged:
             L.append(f"  [{a:6.2f}-{b:6.2f}] speaker #{sp}")
+    if d.get("spk_llm"):
+        L.append("language-model labels per sentence (these decide when available):")
+        for a, b, lab in d["spk_llm"]:
+            L.append(f"  [{a:6.2f}-{b:6.2f}] speaker {lab}")
+    if d.get("audio_turns"):
+        L.append("audio model (hint only): " + ", ".join(f"{a:.1f}-{b:.1f}=#{sp}" for a, b, sp in d["audio_turns"][:40]))
     return "\n".join(L)
 
 
