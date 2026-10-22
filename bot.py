@@ -1250,7 +1250,21 @@ def speaker_of(a: float, b: float, turns):
     return max(acc, key=acc.get) if acc else None
 
 
-def apply_dialogue(cues, turns, max_gap: float = 1.5):
+def _last_part(text: str, limit: int) -> str:
+    """The previous speaker's line, shortened to its last sentence(s) when the whole line would not fit next to a dash."""
+    if len(text) <= limit:
+        return text
+    parts = re.split(r"(?<=[.!?؟…])\s+", text)
+    keep = ""
+    for part in reversed(parts):
+        cand = (part + " " + keep).strip()
+        if len(cand) > limit:
+            break
+        keep = cand
+    return keep or text
+
+
+def apply_dialogue(cues, turns, max_gap: float = 1.5, max_chars: int = 0):
     """Film convention: when another person answers, the previous line stays and the new one appears under it,
     each with a dash:   - first speaker / - second speaker."""
     out, prev = [], None
@@ -1261,7 +1275,7 @@ def apply_dialogue(cues, turns, max_gap: float = 1.5):
             continue
         sp = speaker_of(a - SUB_DELAY, b - SUB_DELAY, turns)
         if prev and sp is not None and prev[0] is not None and sp != prev[0] and a - prev[2] <= max_gap:
-            out.append((a, b, "- " + prev[1] + "\n- " + t))
+            out.append((a, b, "- " + (_last_part(prev[1], max_chars - 2) if max_chars else prev[1]) + "\n- " + t))
         else:
             out.append((a, b, t))
         prev = (sp, t, b)
@@ -2682,7 +2696,7 @@ async def process(bot, chat_id: int, job: dict, status):
             if use_turns:
                 dlg = dialogue_info(use_turns)
                 if dlg[0] and not origs:
-                    planned = apply_dialogue(planned, dlg[1])
+                    planned = apply_dialogue(planned, dlg[1], max_chars=max_chars)
             cues = fix_overlaps(planned)
             if dlg and dlg[0] and not origs:
                 cues = glue_stacks(cues)
