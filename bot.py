@@ -15,6 +15,9 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -1111,6 +1114,140 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
                 out[i] = cues
             except Exception:
                 continue
+    return out
+
+
+# ---------------------------------------------------------------- speakers: automatic dialogue detection
+DIAR_ON = os.environ.get("DIARIZE", "1") != "0"
+DIAR_DIR = BASE_DIR / "models"
+DIAR_LIB = BASE_DIR / "pylib"
+_SEG_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+_EMB_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
+            "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx")
+_diar = {"sd": None, "state": "idle", "err": ""}
+_diar_lock = threading.Lock()
+_diar_run = threading.Lock()
+
+
+def _diar_import():
+    if str(DIAR_LIB) not in sys.path:
+        sys.path.insert(0, str(DIAR_LIB))
+    import sherpa_onnx
+    return sherpa_onnx
+
+
+def _download(url: str, dest: Path):
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with httpx.stream("GET", url, follow_redirects=True, timeout=300) as r:
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_bytes(1 << 20):
+                f.write(chunk)
+    tmp.replace(dest)
+
+
+def diar_setup():
+    """Installs the small speaker-separation engine and its two models once (runs in the background, never blocks videos)."""
+    with _diar_lock:
+        if _diar["sd"] or _diar["state"] == "installing":
+            return
+        _diar["state"], _diar["err"] = "installing", ""
+    try:
+        try:
+            so = _diar_import()
+        except ImportError:
+            DIAR_LIB.mkdir(parents=True, exist_ok=True)
+            subprocess.run([sys.executable, "-m", "pip", "install", "--no-input", "--target", str(DIAR_LIB), "sherpa-onnx"],
+                           check=True, capture_output=True, timeout=900)
+            import importlib
+            importlib.invalidate_caches()
+            so = _diar_import()
+        DIAR_DIR.mkdir(parents=True, exist_ok=True)
+        seg, emb = DIAR_DIR / "seg-pyannote-3.0.onnx", DIAR_DIR / "emb-eres2net.onnx"
+        if not seg.exists():
+            tar = DIAR_DIR / "seg.tar.bz2"
+            _download(_SEG_URL, tar)
+            with tarfile.open(tar, "r:bz2") as t:
+                m = next(x for x in t.getmembers() if x.name.endswith("model.onnx"))
+                seg.write_bytes(t.extractfile(m).read())
+            tar.unlink(missing_ok=True)
+        if not emb.exists():
+            _download(_EMB_URL, emb)
+        cfg = so.OfflineSpeakerDiarizationConfig(
+            segmentation=so.OfflineSpeakerSegmentationModelConfig(
+                pyannote=so.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(seg)),
+                num_threads=int(BURN_THREADS)),
+            embedding=so.SpeakerEmbeddingExtractorConfig(model=str(emb), num_threads=int(BURN_THREADS)),
+            clustering=so.FastClusteringConfig(num_clusters=-1, threshold=0.6),
+            min_duration_on=0.3, min_duration_off=0.5)
+        if not cfg.validate():
+            raise RuntimeError("diarization config invalid")
+        _diar["sd"] = so.OfflineSpeakerDiarization(cfg)
+        _diar["state"] = "ready"
+        log.info("speaker detection ready")
+    except Exception as e:
+        _diar["state"], _diar["err"] = "error", str(e)[:300]
+        log.warning("speaker detection setup failed: %s", _diar["err"])
+
+
+def diarize(audio_path: str):
+    """[(start, end, speaker)] for the whole audio, or None when the engine is not available."""
+    sd = _diar["sd"]
+    if not sd:
+        return None
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", audio_path, "-ac", "1", "-ar", str(sd.sample_rate), "-f", "f32le", "-"],
+                         capture_output=True, timeout=300).stdout
+    x = np.frombuffer(raw, dtype=np.float32)
+    if x.size < sd.sample_rate:
+        return None
+    with _diar_run:
+        res = sd.process(x).sort_by_start_time()
+    return [(float(r.start), float(r.end), int(r.speaker)) for r in res]
+
+
+def dialogue_info(turns, min_share=0.12, min_turns=2):
+    """Decides whether this is a conversation. Strict on purpose: it is better to miss a dialogue than to invent one."""
+    merged = []
+    for a, b, sp in turns:
+        if merged and merged[-1][2] == sp and a - merged[-1][1] < 1.0:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b, sp])
+    share: dict = {}
+    for a, b, sp in merged:
+        share[sp] = share.get(sp, 0.0) + (b - a)
+    tot = sum(share.values())
+    big = {sp for sp, v in share.items() if tot and v / tot >= min_share and v >= 3.0}
+    changes = sum(1 for i in range(1, len(merged))
+                  if merged[i][2] != merged[i - 1][2] and merged[i][2] in big and merged[i - 1][2] in big)
+    return (len(big) >= 2 and changes >= min_turns), merged, share
+
+
+def speaker_of(a: float, b: float, turns):
+    acc: dict = {}
+    for x, y, sp in turns:
+        o = min(b, y) - max(a, x)
+        if o > 0:
+            acc[sp] = acc.get(sp, 0.0) + o
+    return max(acc, key=acc.get) if acc else None
+
+
+def apply_dialogue(cues, turns, max_gap: float = 1.5):
+    """Film convention: when another person answers, the previous line stays and the new one appears under it,
+    each with a dash:   - first speaker / - second speaker."""
+    out, prev = [], None
+    for a, b, t in cues:
+        if "\x01" in t or "\n" in t:
+            out.append((a, b, t))
+            prev = None
+            continue
+        sp = speaker_of(a - SUB_DELAY, b - SUB_DELAY, turns)
+        if prev and sp is not None and prev[0] is not None and sp != prev[0] and a - prev[2] <= max_gap:
+            out.append((a, b, "- " + prev[1] + "\n- " + t))
+        else:
+            out.append((a, b, t))
+        prev = (sp, t, b)
     return out
 
 
@@ -2394,6 +2531,13 @@ async def process(bot, chat_id: int, job: dict, status):
             raw_segments = list(segments)
             vad_regions = await asyncio.to_thread(speech_regions, str(audio)) if dbg else []
             st.mark("transcribe")
+            turns = None
+            if DIAR_ON and mode == "sub" and _diar["sd"]:
+                try:
+                    turns = await asyncio.to_thread(diarize, str(audio))
+                except Exception as e:
+                    log.warning("speaker detection failed: %s", str(e)[:150])
+                st.mark("speakers")
             if DEBUG_TEXT:   # transcripts are private: only logged when DEBUG_TEXT=1 is set on Render
                 log.info("raw transcript (%s): %s", lang, " | ".join(t for _, _, t in segments)[:600])
             if not segments:
@@ -2466,12 +2610,18 @@ async def process(bot, chat_id: int, job: dict, status):
                 else:
                     planned += make_cues([seg], max_chars, [origs[k]] if origs else None, words_out)
             planned = supervise_cues(planned, max_chars)
+            dlg = None
+            if turns:
+                dlg = dialogue_info(turns)
+                if dlg[0] and not origs:
+                    planned = apply_dialogue(planned, dlg[1])
             cues = fix_overlaps(planned)
             if dbg:
                 LAST_DEBUG.clear()
                 LAST_DEBUG.update(dict(lang=lang, tgt=tgt, duration=duration, size=(w, h), delay=SUB_DELAY, max_chars=max_chars,
                                        alt=alt, raw=raw_segments, words=dict(words_out), src=list(src_segments),
-                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions))
+                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions, dlg=dlg,
+                                       diar_state=_diar['state'] + (' ' + _diar['err'] if _diar['err'] else '')))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
             (workdir / "subs_tagged.srt").write_text(build_srt(cues, keep_marks=True), encoding="utf-8")
@@ -3515,6 +3665,16 @@ def build_debug_report(d: dict) -> str:
     for (a, b, t), (pa, _, _) in zip(d["cues"], d["planned"]):
         sh = a - pa
         L.append(f"[{a:6.2f}-{b:6.2f}] {'shift %+.2fs ' % sh if abs(sh) >= 0.1 else ''}{t.replace(chr(1), '').replace(chr(10), ' / ')}")
+    L += ["", "=== 6. SPEAKERS (automatic dialogue detection) ==="]
+    dlg = d.get("dlg")
+    if not dlg:
+        L.append(f"no speaker data (engine: {d.get('diar_state', '?')})")
+    else:
+        ok, merged, share = dlg
+        L.append(f"decision: {'DIALOGUE (dashes added)' if ok else 'single speaker / not enough turns (nothing changed)'}; "
+                 f"speakers={len(share)}; speech seconds per speaker: " + ", ".join(f"#{k}={v:.1f}s" for k, v in sorted(share.items())))
+        for a, b, sp in merged:
+            L.append(f"  [{a:6.2f}-{b:6.2f}] speaker #{sp}")
     return "\n".join(L)
 
 
@@ -3527,6 +3687,17 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = await asyncio.to_thread(build_debug_report, dict(LAST_DEBUG))
     await update.effective_message.reply_document(document=text.encode("utf-8"), filename="subvid-debug.txt")
+
+
+async def cmd_diar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: status of automatic dialogue detection (and a retry of its setup)."""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    if _diar["state"] in ("error", "idle") and DIAR_ON:
+        threading.Thread(target=diar_setup, daemon=True).start()
+        await update.effective_message.reply_text(f"كشف الحوار: {_diar['state']} {_diar['err']}\nأعدت المحاولة الآن، أرسل /diar بعد دقيقتين.")
+        return
+    await update.effective_message.reply_text(f"كشف الحوار: {_diar['state']} {_diar['err']}")
 
 
 async def cmd_delay(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3683,6 +3854,8 @@ async def post_init(app: Application):
         await asyncio.to_thread(get_model)  # warm up so the first request is fast
     if DB_OK:
         _BG_TASKS.append(asyncio.get_running_loop().create_task(db_keepalive(app.bot)))
+    if DIAR_ON:
+        threading.Thread(target=diar_setup, daemon=True).start()      # installs the speaker engine in the background
     log.info("startup complete, memory in use: %s", mem_now())
     await notify_admin(app.bot, f"🟢 البوت اشتغل (تشغيل جديد)\nالذاكرة: {mem_now()}\nقاعدة البيانات: {DB_STATUS}", key="startup")
 
@@ -3772,6 +3945,7 @@ def main():
     app.add_handler(CommandHandler("setgroq", cmd_setgroq))
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("delay", cmd_delay))
+    app.add_handler(CommandHandler("diar", cmd_diar))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
