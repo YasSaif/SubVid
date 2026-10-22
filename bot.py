@@ -187,7 +187,7 @@ def font_scale(font: str, group: str) -> float:
 FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
-SIZES = [("size_s", 1.02), ("size_m", 1.44), ("size_l", 1.98)]   # +20% (was 0.85 / 1.2 / 1.65)
+SIZES = [("size_s", 0.95), ("size_m", 1.2), ("size_l", 1.7)]   # medium = about 38 Arabic chars per line on a 1080-wide video
 STYLES = ["classic", "box", "yellow", "yellowbox", "whitebox", "bluebox", "redbox",
           "green", "cyan", "orange", "pink", "thick", "shadow"]
 
@@ -1059,8 +1059,9 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
         f"into {tgt_name} (\"t\"). Cut BOTH into the same number of subtitle cues, the way cinema subtitles are cut: every cue is "
         "a complete, meaningful clause or phrase that can be read on its own; never end a cue on a preposition, conjunction, "
         "article or the first half of a name, and never separate a verb from its object or a noun from its adjective. "
-        f"A cue may hold at most {hard} characters of the translation (hard limit), and ideally {max_chars} or fewer when the "
-        "meaning stays whole. Prefer FEWER, more meaningful cues over many tiny ones; a short sentence stays as ONE cue. "
+        f"The screen fits {max_chars} characters of the translation on ONE line: make every cue {max_chars} characters or fewer "
+        f"whenever the clause can be cut there without breaking its meaning; use up to {hard} characters (two lines) only when it "
+        "cannot. Do not make cues tiny: aim for a full clause of at least ~15 characters, and a short sentence stays as ONE cue. "
         "Do not change, add or drop any word: concatenating the cues must give exactly the original \"s\" and exactly the "
         "original \"t\", in order. "
         'Return JSON {"r": [[{"s": "...", "t": "..."}, ...], ...]} with one list of cues per item, same order.')
@@ -1319,7 +1320,7 @@ def chars_per_line(w: int, h: int, job: dict, duration: float = 0.0) -> int:
     px = base * SIZES[job["size_i"]][1] * font_scale(font, group) * oh / 288
     avail = ow * (1 - 40 / 384)                     # side margins are 20 of 384 units each
     if tgt in ARABIC_SCRIPT:
-        factor = 0.30                               # measured on real renders: 23-28 px per char at medium (1080 wide); with margin
+        factor = 0.265                              # real renders: ~0.24 of the font px per Arabic char (worst case); small margin
     elif tgt in CJK:
         factor = 1.0
     else:
