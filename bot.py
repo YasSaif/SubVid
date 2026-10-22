@@ -1049,7 +1049,7 @@ def _norm_tok(w: str) -> str:
     return re.sub(r"[^\w]", "", w.lower())
 
 
-def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_name: str):
+def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_name: str, with_src: bool = False):
     """The 'brain': a language model cuts every translated sentence into film-style subtitle cues (complete meaningful
     clauses) and cuts the source sentence at the same places, so the timing comes from the real word times.
     Returns a list of cues (start, end, text) per sentence, or None for a sentence it could not split safely."""
@@ -1062,6 +1062,8 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
         f"Every cue is shown on ONE single line that fits {max_chars} characters of the translation: NEVER make a cue longer than "
         f"{max_chars} characters. Cut where the meaning allows; do not make cues tiny: aim for a full clause of at least "
         "~15 characters, and a short sentence stays as ONE cue. "
+        + (f"The {src_name} part of each cue is shown under it on one line, so it must also be {max_chars} characters or fewer. "
+           if with_src else "") +
         "Do not change, add or drop any word: concatenating the cues must give exactly the original \"s\" and exactly the "
         "original \"t\", in order. "
         'Return JSON {"r": [[{"s": "...", "t": "..."}, ...], ...]} with one list of cues per item, same order.')
@@ -1088,6 +1090,8 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
                     continue
                 if any(len(" ".join(p[1])) > hard + 4 for p in ps):
                     continue
+                if with_src and any(len(" ".join(p[0])) > max_chars + 6 for p in ps):
+                    continue
                 wl = (wmap or {}).get((a, b)) or []
                 if len(wl) != len(sw):
                     wl = []
@@ -1100,6 +1104,8 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
                     else:
                         t0, t1 = a + (b - a) * n0 / total, a + (b - a) * n1 / total
                     line = " ".join(ps_t)
+                    if with_src:
+                        line += "\n\x01" + " ".join(ps_s)             # the matching source words, cut at the same place
                     cues.append((t0, max(t1, t0 + 0.3), line))
                     n0 = n1
                 out[i] = cues
@@ -2450,9 +2456,10 @@ async def process(bot, chat_id: int, job: dict, status):
             max_chars = chars_per_line(w, h, job, duration) if mode == "sub" else 40
             planned = []
             sem = None
-            if mode == "sub" and not origs and lang != tgt and GROQ_API_KEY and len(segments) == len(src_segments):
+            bi_src = bool(origs) and job.get("bi_lang") == lang and len(origs) == len(src_segments)
+            if mode == "sub" and (not origs or bi_src) and lang != tgt and GROQ_API_KEY and len(segments) == len(src_segments):
                 sem = await asyncio.to_thread(split_cues_llm, src_segments, segments, words_out, max_chars,
-                                              names.get(lang, lang), names.get(tgt, tgt))
+                                              names.get(lang, lang), names.get(tgt, tgt), bi_src)
             for k, seg in enumerate(segments):
                 if sem and sem[k]:
                     planned += sem[k]
@@ -2965,7 +2972,8 @@ async def live_frame(job: dict):
     if sec_group:
         sec = LIVE_SAMPLES[sec_group][0]
         sfont = "Noto Naskh Arabic" if sec_group == "ar" else "Noto Sans"
-        sfs = round(fs * 0.7 * 1.15 / 0.9)
+        k2 = 1.15 if (sec_group == "ar" and group != "ar") else 0.9 if (sec_group != "ar" and group == "ar") else 1.0
+        sfs = round(fs * 0.7 * k2)
         ev.append(f"Dialogue: 1,0:00:00.00,0:00:05.00,M,,0,0,0,,{{\\an5\\pos({W // 2},{ycen + round(fs * 1.25)})\\fn{sfont}\\fs{sfs}\\1c&H00D9D9D9&}}{sec}")
     ass = (
         f"[Script Info]\nScriptType: v4.00+\nPlayResX: {W}\nPlayResY: {H}\nWrapStyle: 2\n\n"
