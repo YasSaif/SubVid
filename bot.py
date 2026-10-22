@@ -187,7 +187,7 @@ def font_scale(font: str, group: str) -> float:
 FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
-SIZES = [("size_s", 0.95), ("size_m", 1.2), ("size_l", 1.7)]   # medium = about 38 Arabic chars per line on a 1080-wide video
+SIZES = [("size_s", 0.75), ("size_m", 0.9), ("size_l", 1.2)]   # one subtitle line = a whole phrase: medium ~54 Arabic chars on a 1080-wide video
 STYLES = ["classic", "box", "yellow", "yellowbox", "whitebox", "bluebox", "redbox",
           "green", "cyan", "orange", "pink", "thick", "shadow"]
 
@@ -1053,15 +1053,15 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
     """The 'brain': a language model cuts every translated sentence into film-style subtitle cues (complete meaningful
     clauses) and cuts the source sentence at the same places, so the timing comes from the real word times.
     Returns a list of cues (start, end, text) per sentence, or None for a sentence it could not split safely."""
-    hard = 2 * max_chars
+    hard = max_chars + 2                                  # one line, always
     system = (
         f"You are a professional film subtitler. For each item you get a sentence in {src_name} (\"s\") and its translation "
         f"into {tgt_name} (\"t\"). Cut BOTH into the same number of subtitle cues, the way cinema subtitles are cut: every cue is "
         "a complete, meaningful clause or phrase that can be read on its own; never end a cue on a preposition, conjunction, "
         "article or the first half of a name, and never separate a verb from its object or a noun from its adjective. "
-        f"The screen fits {max_chars} characters of the translation on ONE line: make every cue {max_chars} characters or fewer "
-        f"whenever the clause can be cut there without breaking its meaning; use up to {hard} characters (two lines) only when it "
-        "cannot. Do not make cues tiny: aim for a full clause of at least ~15 characters, and a short sentence stays as ONE cue. "
+        f"Every cue is shown on ONE single line that fits {max_chars} characters of the translation: NEVER make a cue longer than "
+        f"{max_chars} characters. Cut where the meaning allows; do not make cues tiny: aim for a full clause of at least "
+        "~15 characters, and a short sentence stays as ONE cue. "
         "Do not change, add or drop any word: concatenating the cues must give exactly the original \"s\" and exactly the "
         "original \"t\", in order. "
         'Return JSON {"r": [[{"s": "...", "t": "..."}, ...], ...]} with one list of cues per item, same order.')
@@ -1100,7 +1100,7 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
                     else:
                         t0, t1 = a + (b - a) * n0 / total, a + (b - a) * n1 / total
                     line = " ".join(ps_t)
-                    cues.append((t0, max(t1, t0 + 0.3), wrap2(line, max_chars) if len(line) > max_chars else line))
+                    cues.append((t0, max(t1, t0 + 0.3), line))
                     n0 = n1
                 out[i] = cues
             except Exception:
@@ -1109,8 +1109,8 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
 
 
 def supervise_cues(cues, max_chars: int):
-    """The supervisor: checks every cue before it is burnt. One line whenever the text fits, at most two balanced lines,
-    never three; a cue that is too long is split in two at the best place (time shared by length)."""
+    """The supervisor: checks every cue before it is burnt: ONE line each; a cue that is too long is split in two at the
+    best place (time shared by length)."""
     out, fixes = [], 0
     stack = list(cues)[::-1]
     while stack:
@@ -1122,12 +1122,10 @@ def supervise_cues(cues, max_chars: int):
         words = flat.split()
         if len(flat) <= max_chars:
             new = flat
-        elif len(flat) <= 2 * max_chars or len(words) < 4:
-            new = wrap2(flat, max_chars)
-            if any(len(x) > max_chars + 2 for x in new.split("\n")) and len(words) >= 4:
-                new = None
+        elif len(words) < 4:
+            new = wrap2(flat, max_chars)                      # a few very long words: nothing else to do
         else:
-            new = None
+            new = None                                        # one line only: split into more cues
         if new is None:                                       # too long for two lines: split into two cues
             best = None
             for i in range(2, len(words) - 1):
@@ -1162,7 +1160,7 @@ def make_cues(segments, max_chars: int, origs=None, wmap=None):
             continue
         ow = origs[idx].split() if origs and origs[idx] else []
         sw = (wmap or {}).get((start, end)) or []
-        plan = _plan_cues(words, start, end, 2 * max_chars, sw)                # movie style: a cue = one phrase, max two lines
+        plan = _plan_cues(words, start, end, max_chars, sw)                    # movie style: a cue = one phrase on one line
         for t, d, line, p0, p1 in plan:
             txt = wrap2(line, max_chars)
             if ow:
@@ -1338,6 +1336,15 @@ async def src_fps(video: Path) -> float:
         return 0.0
 
 
+def sub_margin_v(align: int, portrait: bool) -> int:
+    """Vertical margin (in 288-high units) used by the burn AND by the live preview, so they always agree."""
+    if align == 2:
+        return 10 if portrait else 8
+    if align == 8:
+        return 30 if portrait else 12
+    return 0
+
+
 async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: int, job: dict,
                          duration: float = 0.0, on_frac=None) -> Path:
     w, h = out_size(w, h, duration)
@@ -1353,12 +1360,7 @@ async def burn_subtitles(video: Path, srt_name: str, workdir: Path, w: int, h: i
     font_size = max(6, round(base * mult * font_scale(font, "ar" if job["tgt"] in ARABIC_SCRIPT else "lat")))
     style_key = STYLES[job["style_i"]]
     align = POSITIONS[job["pos_i"]][1]
-    if align == 2:
-        margin_v = 10 if portrait else 8
-    elif align == 8:
-        margin_v = 30 if portrait else 12
-    else:
-        margin_v = 0
+    margin_v = sub_margin_v(align, portrait)
 
     # force_style's Alignment uses the legacy SSA numbering (5 = top-left!), so the position is set
     # with an \anN tag on every cue instead, which always uses the numpad layout.
@@ -2926,7 +2928,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 _LIVE_CACHE: dict = {}
-LIVE_SAMPLES = {"ar": ("ومدن أخرى، مما أسفر عن وقوع إصابات وأضرار.", "ar"), "lat": ("And in the preceding weeks, Houthis launched missiles.", "lat")}
+LIVE_SAMPLES = {"ar": ("السلام عليكم ورحمة الله وبركاته، كيف حالكم", "ar"), "lat": ("Hello everyone, how are you all doing today?", "lat")}
 
 
 async def live_frame(job: dict):
@@ -2954,7 +2956,8 @@ async def live_frame(job: dict):
     fs = round(12 * mult * font_scale(font, group) * H / 288)
     style_key = STYLES[job["style_i"] % len(STYLES)]
     an_pos = POSITIONS[job["pos_i"] % len(POSITIONS)][0]
-    ycen = {"pos_top": 150, "pos_middle": H // 2, "pos_bottom": H - 120}[an_pos]
+    ycen = {"pos_top": round(sub_margin_v(8, True) * H / 288 + fs * 0.75), "pos_middle": H // 2,
+            "pos_bottom": round(H - sub_margin_v(2, True) * H / 288 - fs * 0.75)}[an_pos]
     if sec_group:
         ycen -= round(fs * 0.5) if an_pos != "pos_top" else 0
     style = _ass_style_line("M", font, fs, STYLE_DEFS[style_key])
