@@ -694,7 +694,7 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     raise last or RuntimeError("no LLM model available")
 
 
-def _llm_json(system: str, payload: dict, timeout: int = 60) -> dict:
+def _llm_json(system: str, payload: dict, timeout: int = 60, effort: str = "low") -> dict:
     """One JSON-mode call to the first available Groq model."""
     last = None
     for model in _LLM_MODELS:
@@ -704,7 +704,7 @@ def _llm_json(system: str, payload: dict, timeout: int = 60) -> dict:
                 "messages": [{"role": "system", "content": system},
                              {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]}
         if model.startswith("openai/gpt-oss"):
-            body["reasoning_effort"] = "low"
+            body["reasoning_effort"] = effort
         try:
             return json.loads(_groq_chat(body, timeout)["choices"][0]["message"]["content"])
         except Exception as e:
@@ -1067,6 +1067,8 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
         "~15 characters, and a short sentence stays as ONE cue. "
         + (f"The {src_name} part of each cue is shown under it on one line, so it must also be {max_chars} characters or fewer. "
            if with_src else "") +
+        "Cut at punctuation first (full stop, comma) and before words like and / but / when; never cut inside a noun phrase "
+        "(for example between 'many' and 'of the people'). "
         "Do not change, add or drop any word: concatenating the cues must give exactly the original \"s\" and exactly the "
         "original \"t\", in order. "
         'Return JSON {"r": [[{"s": "...", "t": "..."}, ...], ...]} with one list of cues per item, same order.')
@@ -1098,19 +1100,34 @@ def split_cues_llm(src_segs, tr_segs, wmap, max_chars: int, src_name: str, tgt_n
                 wl = (wmap or {}).get((a, b)) or []
                 if len(wl) != len(sw):
                     wl = []
-                cues, n0 = [], 0
                 total = len(sw)
+                pcs, n0 = [], 0                                       # pieces: [t0, t1, translation, source]
                 for ps_s, ps_t in ps:
                     n1 = n0 + len(ps_s)
                     if wl:
                         t0, t1 = wl[n0][0], wl[n1 - 1][1]
                     else:
                         t0, t1 = a + (b - a) * n0 / total, a + (b - a) * n1 / total
-                    line = " ".join(ps_t)
-                    if with_src:
-                        line += "\n\x01" + " ".join(ps_s)             # the matching source words, cut at the same place
-                    cues.append((t0, max(t1, t0 + 0.3), line))
+                    pcs.append([t0, t1, " ".join(ps_t), " ".join(ps_s)])
                     n0 = n1
+                src_cap = max_chars + 6
+
+                def fits(x, y):
+                    return len(x[2] + " " + y[2]) <= max_chars and (not with_src or len(x[3] + " " + y[3]) <= src_cap)
+                merged_any = True
+                while merged_any and len(pcs) > 1:                    # a sentence that fits one line stays one cue; no orphan words
+                    merged_any = False
+                    for k in range(len(pcs) - 1):
+                        x, y = pcs[k], pcs[k + 1]
+                        small = min(len(x[2]), len(y[2])) < 12 or len(pcs) == 2
+                        if fits(x, y) and (small or len(" ".join(q[2] for q in pcs)) <= max_chars):
+                            pcs[k:k + 2] = [[x[0], y[1], x[2] + " " + y[2], x[3] + " " + y[3]]]
+                            merged_any = True
+                            break
+                cues = []
+                for t0, t1, tl, sl in pcs:
+                    line = tl + ("\n\x01" + sl if with_src else "")     # the matching source words, cut at the same place
+                    cues.append((t0, max(t1, t0 + 0.3), line))
                 out[i] = cues
             except Exception:
                 continue
@@ -1266,14 +1283,16 @@ def label_speakers_llm(src_segs, turns):
         items.append(it)
     system = (
         "You get the sentences of a video transcript in order. Decide which speaker says each sentence. "
-        "Some items have \"a\": a speaker id guessed by an audio model; it is only a hint and can be wrong (it may merge two similar "
-        "voices into one, or split one voice into two). Use the meaning: a question followed by an answer, a reply, a change of "
-        "point of view (I / you), greetings, a lesson dialogue between two people. If it is a monologue (one person: news, "
-        "lecture, narration, vlog, voice-over), give every sentence label 0. Be conservative: start a new speaker only when it is "
-        "clear. Label speakers 0, 1, 2 in order of first appearance. "
+        "Rely mainly on the MEANING: a question is usually answered by the other person; a contrast or objection (but, no, "
+        "really?, yes) usually comes from the other person; 'I' and 'you' switch between the two speakers; greetings and "
+        "thanks; a language-lesson dialogue between two people (they usually alternate). "
+        "Some items have \"a\": a speaker id from an audio model. It is a WEAK hint: it often puts two similar voices under "
+        "the same id, so never let it override clear meaning. "
+        "If it is a monologue (one person: news, lecture, narration, vlog, voice-over), give every sentence label 0. "
+        "Label speakers 0, 1, 2 in order of first appearance. "
         'Return JSON {"s": [integer, ...]} with exactly one label per item, in the same order.')
     try:
-        res = _llm_json(system, {"items": items}, 90).get("s")
+        res = _llm_json(system, {"items": items}, 90, "medium").get("s")
     except Exception as e:
         log.warning("speaker labelling failed: %s", str(e)[:150])
         return None
@@ -1284,6 +1303,16 @@ def label_speakers_llm(src_segs, turns):
     except Exception:
         return None
     return [(a, b, lab) for (a, b, _), lab in zip(src_segs, labels)]
+
+
+def glue_stacks(cues, max_gap: float = 0.3):
+    """A dialogue pair repeats the previous line on top of the new one: the previous cue is held until the pair starts,
+    so the line does not blink off and on."""
+    cues = [list(c) for c in cues]
+    for i in range(1, len(cues)):
+        if cues[i][2].startswith("- ") and 0 <= cues[i][0] - cues[i - 1][1] <= max_gap:
+            cues[i - 1][1] = cues[i][0]
+    return [tuple(c) for c in cues]
 
 
 def supervise_cues(cues, max_chars: int):
@@ -2655,6 +2684,8 @@ async def process(bot, chat_id: int, job: dict, status):
                 if dlg[0] and not origs:
                     planned = apply_dialogue(planned, dlg[1])
             cues = fix_overlaps(planned)
+            if dlg and dlg[0] and not origs:
+                cues = glue_stacks(cues)
             if dbg:
                 LAST_DEBUG.clear()
                 LAST_DEBUG.update(dict(lang=lang, tgt=tgt, duration=duration, size=(w, h), delay=SUB_DELAY, max_chars=max_chars,
