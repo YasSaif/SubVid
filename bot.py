@@ -187,7 +187,7 @@ def font_scale(font: str, group: str) -> float:
 FONTS_LAT = ["Noto Sans", "Noto Serif", "DejaVu Sans", "DejaVu Serif"]
 CANDIDATES_AR = list(CANDIDATES_AR_ALL)   # everything we would like to offer
 CANDIDATES_LAT = list(FONTS_LAT)
-SIZES = [("size_s", 0.75), ("size_m", 0.9), ("size_l", 1.2)]   # one subtitle line = a whole phrase: medium ~54 Arabic chars on a 1080-wide video
+SIZES = [("size_s", 0.75), ("size_m", 1.1), ("size_l", 1.7)]   # one line per cue: small ~65, medium ~44, large ~29 Arabic chars on a 1080-wide video
 STYLES = ["classic", "box", "yellow", "yellowbox", "whitebox", "bluebox", "redbox",
           "green", "cyan", "orange", "pink", "thick", "shadow"]
 
@@ -2970,7 +2970,7 @@ async def live_frame(job: dict):
     style = _ass_style_line("M", font, fs, STYLE_DEFS[style_key])
     ev = [f"Dialogue: 1,0:00:00.00,0:00:05.00,M,,0,0,0,,{{\\an5\\pos({W // 2},{ycen})}}{main}"]
     if sec_group:
-        sec = LIVE_SAMPLES[sec_group][0]
+        sec = ("Hello, how are you all?" if sec_group == "lat" else LIVE_SAMPLES["ar"][0])   # short: the 2nd line must fit at big sizes
         sfont = "Noto Naskh Arabic" if sec_group == "ar" else "Noto Sans"
         k2 = 1.15 if (sec_group == "ar" and group != "ar") else 0.9 if (sec_group != "ar" and group == "ar") else 1.0
         sfs = round(fs * 0.7 * k2)
