@@ -644,7 +644,7 @@ def _groq_chat(body: dict, timeout: int) -> dict:
         return r.json()
 
 
-def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
+def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None, terms=None):
     task = (
         f"These are consecutive subtitle lines from a video, auto-transcribed from speech ({src_name}). "
         "The transcription may contain mistakes (wrong or misheard words, names, missing letters). "
@@ -659,6 +659,9 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None):
     if gloss:
         task += ("Corrections already found for this transcript - always use exactly these terms/spellings (format: heard => correct): "
                  + "; ".join(f"{a} => {b}" if a != b else a for a, b in list(gloss.items())[:40]) + ". ")
+    if terms and not fix_only:
+        task += ("Terminology for this video - translate these terms EXACTLY like this every time, in every line (format: term => "
+                 "translation): " + "; ".join(f"{a} => {b}" for a, b in list(terms.items())[:40]) + ". ")
     if fix_only:
         task += "Fix obvious transcription mistakes using the context. Keep the same language and meaning."
     else:
@@ -756,7 +759,40 @@ def auto_fixes(segments, alt: str, src_name: str) -> dict:
     return out
 
 
-def review_translation(sources, translated, alt: str, src_name: str, tgt_name: str):
+def build_terms(segments, src_name: str, tgt_name: str) -> dict:
+    """Reads the whole transcript once and fixes ONE translation for every specialised term (animal anatomy, medicine, military,
+    law, tech...), so the same word is never translated two different ways in one video (e.g. 'rumen' always the same)."""
+    if not GROQ_API_KEY or not AUTO_REVIEW:
+        return {}
+    texts = [" ".join(t.split()) for _, _, t in segments][:300]
+    if len(texts) < 3:
+        return {}
+    system = (
+        f"You prepare terminology for translating a video transcript from {src_name} into {tgt_name}. First work out the topic "
+        "(for example: veterinary / cattle, finance, military news, cooking). Then list the specialised terms, technical words and "
+        f"recurring names that appear in the transcript, each with the single most standard {tgt_name} translation used by "
+        f"professionals in that field (not a literal word-by-word one; the exact term a {tgt_name} textbook or news outlet uses). "
+        'Return JSON {"terms": [{"term": "...", "tr": "..."}]} with at most 30 items. "term" MUST be copied exactly from the '
+        "transcript (1-4 words). Skip common words. If there is nothing specialised, return an empty list.")
+    try:
+        d = _llm_json(system, {"lines": texts}, 90, "medium")
+    except Exception as e:
+        log.warning("terminology skipped: %s", str(e)[:150])
+        return {}
+    joined = "\n".join(texts).lower()
+    out = {}
+    for it in d.get("terms", [])[:30]:
+        try:
+            a, b = str(it["term"]).strip(), str(it["tr"]).strip()
+        except Exception:
+            continue
+        if a and b and a.lower() in joined and len(a) <= 60 and len(b) <= 80:
+            out[a] = b
+    log.info("terminology: %d terms", len(out))
+    return out
+
+
+def review_translation(sources, translated, alt: str, src_name: str, tgt_name: str, terms=None):
     """Second pass: a strict reviewer compares each source line with its translation and corrects mistakes.
     Keeps the same number of lines; any problem -> the original translation is kept."""
     if not GROQ_API_KEY or not AUTO_REVIEW or not translated or len(translated) > 160:
@@ -768,6 +804,9 @@ def review_translation(sources, translated, alt: str, src_name: str, tgt_name: s
         "translation (put it back), wrong names, and Latin-script names that should be written in the target script (keep "
         "acronyms). Keep each item the same sentence: do NOT merge, split or reorder items; the length may change by up to 30%. "
         'If a translation is already natural and correct, return it unchanged. Return JSON {"t": [...]} with EXACTLY the same number of items.')
+    if terms:
+        system += (" Terminology for this video, to be used EXACTLY like this in every item (term => translation): "
+                   + "; ".join(f"{a} => {b}" for a, b in list(terms.items())[:40]) + ".")
     out = []
     for i in range(0, len(translated), 30):
         src_b, tr_b = sources[i:i + 30], translated[i:i + 30]
@@ -784,7 +823,7 @@ def review_translation(sources, translated, alt: str, src_name: str, tgt_name: s
     return out
 
 
-def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=None):
+def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=None, terms=None):
     """Context-aware translation + correction via Groq. Raises on failure."""
     names = {c: n for n, c in LANG_NAME_TO_CODE.items()}
     src_name, tgt_name = names.get(src, src), names.get(tgt, tgt)
@@ -792,7 +831,8 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=No
     def run(batch):
         """A batch that fails (wrong line count, bad JSON) is split in two and retried: small batches rarely fail."""
         try:
-            return _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "", gloss=gloss)
+            return _llm_batch(batch, src_name, tgt_name, fix_only=(src == tgt), alt=alt if len(texts) <= 30 else "", gloss=gloss,
+                              terms=terms)
         except Exception:
             if len(batch) <= 3:
                 raise
@@ -806,11 +846,11 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=No
     return [(s, e, r or t) for (s, e, _), r, t in zip(segments, result, texts)]
 
 
-def translate_segments(segments, src: str, tgt: str, alt: str = "", gloss=None):
+def translate_segments(segments, src: str, tgt: str, alt: str = "", gloss=None, terms=None):
     """Translate in a few small batches (one segment per line)."""
     if GROQ_API_KEY:
         try:
-            return translate_segments_llm(segments, src, tgt, alt, gloss)
+            return translate_segments_llm(segments, src, tgt, alt, gloss, terms)
         except Exception as e:
             log.warning("Groq translation failed, using fallback chain: %s", str(e)[:150])
     if src == tgt:
@@ -2632,11 +2672,14 @@ async def process(bot, chat_id: int, job: dict, status):
                 spk_llm = await asyncio.to_thread(label_speakers_llm, list(src_segments), turns)
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
+            terms = {}
+            if lang != tgt and GROQ_API_KEY:
+                terms = await asyncio.to_thread(build_terms, segments, names.get(lang, lang), names.get(tgt, tgt))
             if lang != tgt or GROQ_API_KEY:
-                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt, gl)
+                segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt, gl, terms)
                 if lang != tgt and len(segments) == len(orig_texts):   # reviewer pass
                     reviewed = await asyncio.to_thread(review_translation, orig_texts, [t for _, _, t in segments], alt,
-                                                       names.get(lang, lang), names.get(tgt, tgt))
+                                                       names.get(lang, lang), names.get(tgt, tgt), terms)
                     segments = [(a, b, r) for (a, b, _), r in zip(segments, reviewed)]
                 st.mark("translate")
             if time.time() - LLM_LIMITED_AT < 120:
@@ -2704,7 +2747,7 @@ async def process(bot, chat_id: int, job: dict, status):
                 LAST_DEBUG.clear()
                 LAST_DEBUG.update(dict(lang=lang, tgt=tgt, duration=duration, size=(w, h), delay=SUB_DELAY, max_chars=max_chars,
                                        alt=alt, raw=raw_segments, words=dict(words_out), src=list(src_segments),
-                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions, dlg=dlg, spk_llm=spk_llm, audio_turns=turns,
+                                       final=list(segments), planned=planned, cues=cues, vad=vad_regions, dlg=dlg, spk_llm=spk_llm, audio_turns=turns, terms=dict(terms),
                                        diar_state=_diar['state'] + (' ' + _diar['err'] if _diar['err'] else '')))
             srt_text = build_srt(cues)
             (workdir / "subs.srt").write_text(srt_text, encoding="utf-8")
@@ -3744,6 +3787,9 @@ def build_debug_report(d: dict) -> str:
         L.append(f"[{_tm(a)}] {'!' if ratio < 0.55 else ' '} {src}\n          -> {tr}")
     if len(d["src"]) != len(d["final"]):
         L.append(f"(note: {len(d['src'])} source lines but {len(d['final'])} translated lines)")
+    if d.get("terms"):
+        L += ["", "=== 4b. TERMINOLOGY used for the whole video (term => translation) ==="]
+        L += [f"  {a} => {b}" for a, b in d["terms"].items()]
     # 5. cues
     L += ["", "=== 5. FINAL SUBTITLES (shift = how much later than planned) ==="]
     for (a, b, t), (pa, _, _) in zip(d["cues"], d["planned"]):
