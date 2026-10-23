@@ -102,6 +102,8 @@ def _secret(name: str):
 
 
 GROQ_API_KEY = _secret("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")  # optional: far more accurate transcription + translation
+CEREBRAS_API_KEY = _secret("CEREBRAS_API_KEY") or os.environ.get("CEREBRAS_API_KEY")   # optional backup for translation
+GEMINI_API_KEY = _secret("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")         # optional backup for translation
 GROQ_ASR_MODEL = os.environ.get("GROQ_ASR_MODEL", "whisper-large-v3")  # most accurate; turbo is used as fallback
 GROQ_ASR_FALLBACK = "whisper-large-v3-turbo"
 SUB_DELAY = float(_secret("SUB_DELAY") if _secret("SUB_DELAY") is not None else os.environ.get("SUB_DELAY", "0.06"))  # seconds subtitles are shifted later (text was appearing before the voice)
@@ -416,8 +418,13 @@ def get_model() -> WhisperModel:
     global _model
     with _model_lock:
         if _model is None:
-            log.info("Loading Whisper model: %s", WHISPER_MODEL)
-            _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS, num_workers=1)
+            name = os.environ.get("FALLBACK_WHISPER") or ("small" if LOCAL else WHISPER_MODEL)   # the big server can afford a better backup
+            log.info("Loading Whisper model: %s", name)
+            try:
+                _model = WhisperModel(name, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS, num_workers=1)
+            except Exception as e:
+                log.warning("Whisper %s failed (%s), using %s", name, str(e)[:100], WHISPER_MODEL)
+                _model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8", cpu_threads=WHISPER_THREADS, num_workers=1)
         return _model
 
 
@@ -518,7 +525,7 @@ def transcribe(audio_path: str, language=None, vocab: str = "", words_out=None):
         try:
             return transcribe_groq(audio_path, language, vocab, words_out)
         except Exception as e:
-            if "429" in str(e):   # free-tier limit: local Whisper on this tiny CPU would take forever
+            if "429" in str(e) and not LOCAL:   # free-tier limit: local Whisper on a tiny CPU would take forever
                 raise UserError("busy")
             log.warning("Groq transcription failed, using local Whisper: %s", str(e)[:150])
     segments, info = get_model().transcribe(
@@ -628,20 +635,121 @@ def _rate_wait(text: str) -> float:
     return mins * 60 + val
 
 
-def _groq_chat(body: dict, timeout: int) -> dict:
-    """POST to Groq; on a rate limit that clears within ~25 s, wait and retry once instead of giving up."""
+_PROVIDERS = {
+    "groq": ("https://api.groq.com/openai/v1", lambda: GROQ_API_KEY),
+    "cerebras": ("https://api.cerebras.ai/v1", lambda: CEREBRAS_API_KEY),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", lambda: GEMINI_API_KEY),
+}
+_pick_cache: dict = {}
+
+
+def HAS_LLM() -> bool:
+    return bool(GROQ_API_KEY or CEREBRAS_API_KEY or GEMINI_API_KEY)
+
+
+def _chat(provider: str, body: dict, timeout: int) -> dict:
+    """POST to an OpenAI-compatible chat endpoint; on a rate limit that clears within ~25 s, wait and retry once."""
+    url, key_fn = _PROVIDERS[provider]
     for attempt in range(2):
-        r = httpx.post("https://api.groq.com/openai/v1/chat/completions",
-                       headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, json=body, timeout=timeout)
+        r = httpx.post(url + "/chat/completions", headers={"Authorization": f"Bearer {key_fn()}"}, json=body, timeout=timeout)
+        if r.status_code == 400 and provider != "groq" and "response_format" in body:
+            body = {k: v for k, v in body.items() if k != "response_format"}      # JSON mode not accepted: ask in the prompt only
+            continue
         if r.status_code == 429 and attempt == 0:
             w = _rate_wait(r.text)
             if 0 < w <= 25:
-                log.info("Groq rate limit, waiting %.1fs", w)
+                log.info("%s rate limit, waiting %.1fs", provider, w)
                 time.sleep(w + 0.5)
                 continue
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
+    raise RuntimeError("no response")
+
+
+def _groq_chat(body: dict, timeout: int) -> dict:
+    return _chat("groq", body, timeout)
+
+
+def _loads_json(text: str):
+    """JSON from a model reply, also when it is wrapped in ```json fences or has text around it."""
+    t = (text or "").strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t)
+    try:
+        return json.loads(t)
+    except Exception:
+        i, j = t.find("{"), t.rfind("}")
+        return json.loads(t[i:j + 1])
+
+
+def _provider_model(provider: str) -> str:
+    """The best available model of a backup provider (asked from its model list once, then remembered)."""
+    env = os.environ.get(provider.upper() + "_MODEL")
+    if env:
+        return env
+    if provider in _pick_cache:
+        return _pick_cache[provider]
+    url, key_fn = _PROVIDERS[provider]
+    ids = []
+    try:
+        r = httpx.get(url + "/models", headers={"Authorization": f"Bearer {key_fn()}"}, timeout=20)
+        j = r.json()
+        ids = [str(m.get("id", "")).replace("models/", "") for m in (j.get("data") or j.get("models") or [])]
+    except Exception as e:
+        log.warning("%s model list failed: %s", provider, str(e)[:120])
+    pick = None
+    if provider == "cerebras":
+        for pref in ("gpt-oss-120b", "qwen-3-235b", "llama-3.3-70b", "llama3.1-70b"):
+            pick = next((i for i in ids if pref in i), None)
+            if pick:
+                break
+        pick = pick or "gpt-oss-120b"
+    else:
+        cand = [i for i in ids if "flash" in i and not any(x in i for x in ("lite", "image", "tts", "live", "audio", "embed", "thinking"))]
+        stable = [i for i in cand if not any(x in i for x in ("preview", "exp"))] or cand
+        stable.sort(key=lambda i: [float(x) for x in re.findall(r"\d+(?:\.\d+)?", i)] or [0.0], reverse=True)
+        pick = stable[0] if stable else "gemini-2.5-flash"
+    _pick_cache[provider] = pick
+    log.info("%s model: %s", provider, pick)
+    return pick
+
+
+def _llm_chain():
+    """Order of models to try: the two best Groq models, then the backup providers, then Groq's small model."""
+    groq = [("groq", m) for m in _LLM_MODELS] if GROQ_API_KEY else []
+    ch = groq[:2]
+    if CEREBRAS_API_KEY:
+        ch.append(("cerebras", _provider_model("cerebras")))
+    if GEMINI_API_KEY:
+        ch.append(("gemini", _provider_model("gemini")))
+    return ch + groq[2:]
+
+
+def _llm_call(system: str, user_obj: dict, temperature: float, timeout: int, effort: str = "low"):
+    """Runs the chain until one model answers with valid JSON. Returns (parsed JSON, 'provider/model')."""
+    global LLM_LIMITED_AT
+    last = None
+    for prov, model in _llm_chain():
+        key = f"{prov}/{model}"
+        if _llm_bad.get(key, 0) > time.time():
+            continue
+        body = {"model": model, "temperature": temperature, "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": json.dumps(user_obj, ensure_ascii=False)}]}
+        if "gpt-oss" in model and prov in ("groq", "cerebras"):
+            body["reasoning_effort"] = effort
+        try:
+            return _loads_json(_chat(prov, body, timeout)["choices"][0]["message"]["content"]), key
+        except Exception as e:
+            last = e
+            log.warning("LLM %s failed: %s", key, str(e)[:200])
+            if "HTTP 429" in str(e) and prov == "groq":
+                LLM_LIMITED_AT = time.time()
+            if any(c in str(e) for c in ("HTTP 404", "HTTP 403", "HTTP 401")):
+                _llm_bad[key] = time.time() + 3600      # not available / bad key -> skip for an hour
+            elif "HTTP 429" in str(e):
+                _llm_bad[key] = time.time() + 120       # out of quota for now -> let the next provider work
+    raise last or RuntimeError("no LLM model available")
 
 
 def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None, terms=None):
@@ -675,50 +783,26 @@ def _llm_batch(texts, src_name, tgt_name, fix_only, alt="", gloss=None, terms=No
     task += (' Return JSON {"t": [...]} with EXACTLY the same number of items, in the same order, '
              "one output string per input line. No explanations.")
     last = None
-    for model in _LLM_MODELS:
-        if _llm_bad.get(model, 0) > time.time():
-            continue
-        body = {"model": model, "temperature": 0.2, "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": task},
-                             {"role": "user", "content": json.dumps({"lines": texts}, ensure_ascii=False)}]}
-        if model.startswith("openai/gpt-oss"):
-            body["reasoning_effort"] = "low"
+    for attempt in range(2):                      # a wrong line count from one model -> try the next one
         try:
-            out = json.loads(_groq_chat(body, 60)["choices"][0]["message"]["content"])["t"]
+            d, used = _llm_call(task, {"lines": texts}, 0.2, 60)
+            out = d["t"]
             if not isinstance(out, list) or len(out) != len(texts):
                 raise ValueError("line count mismatch")
-            log.info("LLM used: %s", model)
+            log.info("LLM used: %s", used)
             return [str(x).strip() for x in out]
         except Exception as e:
             last = e
-            log.warning("Groq LLM %s failed: %s", model, str(e)[:250])
-            if "HTTP 404" in str(e) or "HTTP 403" in str(e):
-                _llm_bad[model] = time.time() + 3600   # not available for this account -> skip for an hour
+            log.warning("LLM batch failed: %s", str(e)[:250])
+            if attempt == 0 and "line count" in str(e):
+                for k in list(_llm_chain())[:1]:
+                    _llm_bad[f"{k[0]}/{k[1]}"] = time.time() + 60
     raise last or RuntimeError("no LLM model available")
 
 
 def _llm_json(system: str, payload: dict, timeout: int = 60, effort: str = "low") -> dict:
-    """One JSON-mode call to the first available Groq model."""
-    last = None
-    for model in _LLM_MODELS:
-        if _llm_bad.get(model, 0) > time.time():
-            continue
-        body = {"model": model, "temperature": 0.1, "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": system},
-                             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]}
-        if model.startswith("openai/gpt-oss"):
-            body["reasoning_effort"] = effort
-        try:
-            return json.loads(_groq_chat(body, timeout)["choices"][0]["message"]["content"])
-        except Exception as e:
-            last = e
-            log.warning("Groq LLM %s failed: %s", model, str(e)[:200])
-            if "HTTP 429" in str(e):
-                global LLM_LIMITED_AT
-                LLM_LIMITED_AT = time.time()
-            if "HTTP 404" in str(e) or "HTTP 403" in str(e):
-                _llm_bad[model] = time.time() + 3600
-    raise last or RuntimeError("no LLM model available")
+    """One JSON-mode call to the first available model (Groq, then the backup providers)."""
+    return _llm_call(system, payload, 0.1, timeout, effort)[0]
 
 
 LLM_LIMITED_AT = 0.0
@@ -728,7 +812,7 @@ AUTO_REVIEW = os.environ.get("AUTO_REVIEW", "1") != "0"
 def auto_fixes(segments, alt: str, src_name: str) -> dict:
     """Automatic proofreading of the raw transcript: finds misheard / garbled words (using the whole context and the
     second speech model's version) and returns {wrong text: right text}. Replaces the old manual glossary."""
-    if not GROQ_API_KEY or not AUTO_REVIEW:
+    if not HAS_LLM() or not AUTO_REVIEW:
         return {}
     texts = [" ".join(t.split()) for _, _, t in segments][:400]
     system = (
@@ -762,7 +846,7 @@ def auto_fixes(segments, alt: str, src_name: str) -> dict:
 def build_terms(segments, src_name: str, tgt_name: str) -> dict:
     """Reads the whole transcript once and fixes ONE translation for every specialised term (animal anatomy, medicine, military,
     law, tech...), so the same word is never translated two different ways in one video (e.g. 'rumen' always the same)."""
-    if not GROQ_API_KEY or not AUTO_REVIEW:
+    if not HAS_LLM() or not AUTO_REVIEW:
         return {}
     texts = [" ".join(t.split()) for _, _, t in segments][:300]
     if len(texts) < 3:
@@ -795,7 +879,7 @@ def build_terms(segments, src_name: str, tgt_name: str) -> dict:
 def review_translation(sources, translated, alt: str, src_name: str, tgt_name: str, terms=None):
     """Second pass: a strict reviewer compares each source line with its translation and corrects mistakes.
     Keeps the same number of lines; any problem -> the original translation is kept."""
-    if not GROQ_API_KEY or not AUTO_REVIEW or not translated or len(translated) > 160:
+    if not HAS_LLM() or not AUTO_REVIEW or not translated or len(translated) > 160:
         return translated
     system = (
         f"You are a senior subtitle editor and a native {tgt_name} speaker. For each numbered item you get the source line "
@@ -848,7 +932,7 @@ def translate_segments_llm(segments, src: str, tgt: str, alt: str = "", gloss=No
 
 def translate_segments(segments, src: str, tgt: str, alt: str = "", gloss=None, terms=None):
     """Translate in a few small batches (one segment per line)."""
-    if GROQ_API_KEY:
+    if HAS_LLM():
         try:
             return translate_segments_llm(segments, src, tgt, alt, gloss, terms)
         except Exception as e:
@@ -2668,14 +2752,14 @@ async def process(bot, chat_id: int, job: dict, status):
             segments, words_out = merge_sentences(segments, words_out)   # translate and show whole sentences
             src_segments = segments
             spk_llm = None
-            if DIAR_ON and mode == "sub" and GROQ_API_KEY and not job.get("bi"):
+            if DIAR_ON and mode == "sub" and HAS_LLM() and not job.get("bi"):
                 spk_llm = await asyncio.to_thread(label_speakers_llm, list(src_segments), turns)
             job["lang"] = lang
             orig_texts = [" ".join(t.split()) for _, _, t in segments]
             terms = {}
-            if lang != tgt and GROQ_API_KEY:
+            if lang != tgt and HAS_LLM():
                 terms = await asyncio.to_thread(build_terms, segments, names.get(lang, lang), names.get(tgt, tgt))
-            if lang != tgt or GROQ_API_KEY:
+            if lang != tgt or HAS_LLM():
                 segments = await asyncio.to_thread(translate_segments, segments, lang, tgt, alt, gl, terms)
                 if lang != tgt and len(segments) == len(orig_texts):   # reviewer pass
                     reviewed = await asyncio.to_thread(review_translation, orig_texts, [t for _, _, t in segments], alt,
@@ -2725,7 +2809,7 @@ async def process(bot, chat_id: int, job: dict, status):
             planned = []
             sem = None
             bi_src = bool(origs) and job.get("bi_lang") == lang and len(origs) == len(src_segments)
-            if mode == "sub" and (not origs or bi_src) and lang != tgt and GROQ_API_KEY and len(segments) == len(src_segments):
+            if mode == "sub" and (not origs or bi_src) and lang != tgt and HAS_LLM() and len(segments) == len(src_segments):
                 sem = await asyncio.to_thread(split_cues_llm, src_segments, segments, words_out, max_chars,
                                               names.get(lang, lang), names.get(tgt, tgt), bi_src)
             for k, seg in enumerate(segments):
@@ -3722,6 +3806,51 @@ async def cmd_setgroq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(msg.chat_id, "✅ المفتاح صحيح، حُفظ وبدأ استخدامه الآن، وحذفت رسالتك.")
 
 
+async def cmd_setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin only: /setkey cerebras <key> or /setkey gemini <key> saves a backup-provider key (the message is deleted at once)."""
+    global CEREBRAS_API_KEY, GEMINI_API_KEY
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        return
+    msg = update.effective_message
+    args = context.args or []
+    try:
+        await msg.delete()
+    except TelegramError:
+        pass
+    prov = (args[0].lower() if args else "")
+    key = "".join(args[1].split()).strip("'\"") if len(args) > 1 else ""
+    if prov not in ("cerebras", "gemini") or len(key) < 20:
+        await context.bot.send_message(msg.chat_id, "الصيغة: /setkey cerebras المفتاح  أو  /setkey gemini المفتاح")
+        return
+    url = _PROVIDERS[prov][0]
+
+    def _test():
+        return httpx.get(url + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=20).status_code
+
+    try:
+        code = await asyncio.to_thread(_test)
+    except Exception as e:
+        await context.bot.send_message(msg.chat_id, f"⚠️ ما قدرت أتحقق من المفتاح ({type(e).__name__}). لم يُحفظ.")
+        return
+    if code != 200:
+        await context.bot.send_message(msg.chat_id, f"❌ المفتاح مرفوض (HTTP {code}). انسخه من جديد. لم يُحفظ.")
+        return
+    try:
+        d = json.loads((BASE_DIR / "secrets.json").read_text(encoding="utf-8"))
+    except Exception:
+        d = {}
+    d[prov.upper() + "_API_KEY"] = key
+    (BASE_DIR / "secrets.json").write_text(json.dumps(d), encoding="utf-8")
+    if prov == "cerebras":
+        CEREBRAS_API_KEY = key
+    else:
+        GEMINI_API_KEY = key
+    _pick_cache.pop(prov, None)
+    _llm_bad.clear()
+    model = await asyncio.to_thread(_provider_model, prov)
+    await context.bot.send_message(msg.chat_id, f"✅ مفتاح {prov} صحيح، حُفظ وصار احتياطاً للترجمة. النموذج: {model}. وحذفت رسالتك.")
+
+
 LAST_DEBUG: dict = {}
 
 
@@ -3943,6 +4072,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"الذاكرة الآن: {mem_now()} · الذروة: {mem_peak()}\n"
         f"الطلبات في الطابور/المعالجة: {len(PENDING)}\n"
         f"Groq: {'مفعّل' if GROQ_API_KEY else 'غير مفعّل'} · ASR={GROQ_ASR_MODEL}\n"
+        f"احتياطي الترجمة: Cerebras {'✅' if CEREBRAS_API_KEY else '—'} · Gemini {'✅' if GEMINI_API_KEY else '—'}\n"
         f"نماذج الترجمة المعطّلة مؤقتًا: {', '.join(bad) or 'لا يوجد'}\n"
         f"الخطوط: {', '.join(FONTS_AR)}\n"
         f"قاعدة البيانات: {DB_STATUS}"
@@ -4093,6 +4223,7 @@ def main():
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("delay", cmd_delay))
     app.add_handler(CommandHandler("diar", cmd_diar))
+    app.add_handler(CommandHandler("setkey", cmd_setkey))
     app.add_handler(CommandHandler(["stats", "status"], cmd_stats))
     app.add_handler(CommandHandler(["allow", "disallow"], cmd_allow))
     app.add_handler(
