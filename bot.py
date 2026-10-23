@@ -135,7 +135,7 @@ RING.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(messa
 logging.getLogger().addHandler(RING)
 
 URL_RE = re.compile(r"https?://\S+")
-JOB_SEM = asyncio.Semaphore(int(os.environ.get("JOB_CONCURRENCY", "1")))  # one heavy job at a time (protects RAM/CPU)
+JOB_SEM = asyncio.Semaphore(int(os.environ.get("JOB_CONCURRENCY", "2" if LOCAL else "1")))  # 2 jobs at once on the big Oracle server, 1 on small hosts
 JOBS: "OrderedDict[str, dict]" = OrderedDict()  # key -> job settings
 PENDING: list = []  # ids of jobs that are running or waiting (for queue position)
 
